@@ -100,7 +100,7 @@ mock_config = {
 }
 
 mock_status = {
-    "version": "1.0.3-preview",
+    "version": "1.0.4-preview",
     "modemReady": True,
     "modemPhase": "ready",
     "wifiConnected": True,
@@ -195,7 +195,7 @@ mock_sent = [
 
 mock_log = [
     "配置已加载: wifi=Demo-WiFi, webUser=admin",
-    "ESP-IDF 迁移版启动: 1.0.3-preview",
+    "ESP-IDF 迁移版启动: 1.0.4-preview",
     "Web 资源 hash=preview shell=1595 css=4249 js=16968",
     "mDNS 已启动: http://sms.local",
     "连接 WiFi: Demo-WiFi",

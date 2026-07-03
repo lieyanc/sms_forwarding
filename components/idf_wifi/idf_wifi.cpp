@@ -496,7 +496,9 @@ static void provision_button_task(void*)
     }
 }
 
-static esp_err_t connect_sta(const IdfConfig& config)
+// 只发起 STA 连接不等待结果；首连成败由 sta_connect_watch_task 后台判定。
+// 这样 app_main 不再被首连(最长 20s)阻塞，Web/推送/模组/短信与 WiFi 连接并行启动。
+static esp_err_t connect_sta_begin(const IdfConfig& config)
 {
     wifi_config_t sta_config = {};
     strlcpy(reinterpret_cast<char*>(sta_config.sta.ssid), config.wifiSsid.c_str(), sizeof(sta_config.sta.ssid));
@@ -514,11 +516,28 @@ static esp_err_t connect_sta(const IdfConfig& config)
     if (err != ESP_OK) return err;
     ESP_LOGI(TAG, "连接 WiFi: %s%s", config.wifiSsid.c_str(), config.wifiFromFallback ? " (fallback)" : "");
     idf_logf("连接 WiFi: %s%s", config.wifiSsid.c_str(), config.wifiFromFallback ? " (fallback)" : "");
+    return ESP_OK;
+}
 
+// 等待首连结果：成功清 AP 态；20s 超时回退配网 AP(与原同步逻辑一致)
+static void sta_wait_first_connect(void)
+{
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
         pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
-    return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
+    if (bits & WIFI_CONNECTED_BIT) {
+        set_ap_state(false, false, std::string());
+    } else {
+        ESP_LOGW(TAG, "WiFi 首次连接超时，进入 APSTA 配网模式");
+        idf_log_line("WiFi 首次连接超时，进入 APSTA 配网模式");
+        ESP_ERROR_CHECK_WITHOUT_ABORT(start_provisioning_ap(false));
+    }
+}
+
+static void sta_connect_watch_task(void*)
+{
+    sta_wait_first_connect();
+    vTaskDelete(nullptr);
 }
 
 esp_err_t idf_wifi_start(const IdfConfig& config)
@@ -607,15 +626,18 @@ esp_err_t idf_wifi_start(const IdfConfig& config)
         return start_provisioning_ap(false);
     }
 
-    err = connect_sta(config);
-    if (err == ESP_OK) {
-        set_ap_state(false, false, std::string());
+    err = connect_sta_begin(config);
+    if (err != ESP_OK) {
+        // 连接发起即失败(set_mode/set_config/connect 错误)：记录真实错误码后直接回退配网
+        ESP_LOGW(TAG, "WiFi 连接发起失败(%s)，进入 APSTA 配网模式", esp_err_to_name(err));
+        idf_logf("WiFi 连接发起失败(%s)，进入 APSTA 配网模式", esp_err_to_name(err));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(start_provisioning_ap(false));
         return ESP_OK;
     }
-
-    ESP_LOGW(TAG, "WiFi 首次连接超时，进入 APSTA 配网模式");
-    idf_log_line("WiFi 首次连接超时，进入 APSTA 配网模式");
-    ESP_ERROR_CHECK_WITHOUT_ABORT(start_provisioning_ap(false));
+    // 3072：任务里 start_provisioning_ap 会用到 wifi_config_t + 日志格式化缓冲
+    if (xTaskCreate(sta_connect_watch_task, "idf_sta_watch", 3072, nullptr, 2, nullptr) != pdPASS) {
+        sta_wait_first_connect();  // 任务创建失败退回同步等待，保证配网回退不丢
+    }
     return ESP_OK;
 }
 

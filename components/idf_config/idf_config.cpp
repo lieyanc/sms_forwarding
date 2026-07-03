@@ -708,6 +708,28 @@ IdfConfig idf_config_get(void)
     return config_snapshot();
 }
 
+IdfConfigStatusView idf_config_get_status_view(void)
+{
+    IdfConfigStatusView view;
+    if (ensure_config_mutex() != ESP_OK) return view;
+    xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+    view.tzOffsetMin = s_config.tzOffsetMin;
+    view.dataEnabled = s_config.dataEnabled;
+    view.emailEnabled = s_config.emailEnabled;
+    view.pushEnabled = s_config.pushEnabled;
+    view.adminPhone = s_config.adminPhone;
+    view.phoneNumber = s_config.phoneNumber;
+    view.apn = s_config.apn;
+    // 一次持锁取齐 /status 所需派生值：既省两次锁往返，也保证同一快照内自洽
+    view.emailConfigured = !s_config.smtpServer.empty() && !s_config.smtpUser.empty() &&
+                           !s_config.smtpPass.empty() && !s_config.smtpSendTo.empty();
+    for (const auto& ch : s_config.pushChannels) {
+        if (ch.enabled) ++view.pushEnabledCount;
+    }
+    xSemaphoreGive(s_config_mutex);
+    return view;
+}
+
 // 以下布尔/小字段访问器都在锁内直接求值：全量快照要深拷贝 42 个 std::string，
 // 在每个 HTTP 请求上都做一次会造成持续的堆分配抖动与碎片化
 bool idf_config_has_sta_credentials(void)

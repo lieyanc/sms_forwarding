@@ -113,6 +113,8 @@ struct ForwardDecision {
 };
 
 static SemaphoreHandle_t s_mutex = nullptr;
+// worker 唤醒信号：新任务入队即刻开始处理，不等 100ms 空闲轮询
+static SemaphoreHandle_t s_wake_sem = nullptr;
 static std::array<PushJob, PUSH_QUEUE_MAX> s_push_jobs;
 static std::array<ForwardJob, FWD_QUEUE_MAX> s_forward_jobs;
 static std::array<EmailJob, EMAIL_QUEUE_MAX> s_email_jobs;
@@ -123,6 +125,12 @@ static std::atomic<bool> s_busy{false};
 static void ensure_init()
 {
     if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
+    if (!s_wake_sem) s_wake_sem = xSemaphoreCreateBinary();
+}
+
+static void wake_worker()
+{
+    if (s_wake_sem) xSemaphoreGive(s_wake_sem);
 }
 
 // TLS 发送前的低堆保护：最大可分配块不足时推迟发送（任务留在队列里稍后重试）
@@ -1535,7 +1543,14 @@ static void push_task(void*)
         if (!did) did = process_push_one();
         if (!did) did = process_email_one();
         if (!did) did = process_test_one();
-        vTaskDelay(pdMS_TO_TICKS(did ? 10 : 100));
+        if (did) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else if (s_wake_sem) {
+            // 空闲时等唤醒信号：入队即处理；100ms 超时兜底以按时拾取退避重试任务
+            xSemaphoreTake(s_wake_sem, pdMS_TO_TICKS(100));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
 }
 
@@ -1558,7 +1573,8 @@ bool idf_push_enqueue_forward(const char* sender, const char* text, const char* 
     if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
     bool ok = enqueue_forward_locked(sender, text, timestamp, inbox_id);
     xSemaphoreGive(s_mutex);
-    if (!ok) idf_log_line("转发队列已满，短信暂未转发");
+    if (ok) wake_worker();
+    else idf_log_line("转发队列已满，短信暂未转发");
     return ok;
 }
 
@@ -1580,6 +1596,7 @@ int idf_push_enqueue_notify(const char* title, const char* body, const char* tim
         ++dispatched;
     }
     xSemaphoreGive(s_mutex);
+    if (dispatched > 0) wake_worker();
     return dispatched;
 }
 
@@ -1594,7 +1611,10 @@ bool idf_push_enqueue_email(const char* subject, const char* body)
     bool ok = enqueue_email_job_locked(subject ? subject : "", body ? body : "");
     int depth = email_queue_depth_locked();
     xSemaphoreGive(s_mutex);
-    if (ok) idf_logf("邮件已入队，当前待发=%d", depth);
+    if (ok) {
+        wake_worker();
+        idf_logf("邮件已入队，当前待发=%d", depth);
+    }
     return ok;
 }
 
@@ -1666,6 +1686,7 @@ bool idf_push_enqueue_test(uint8_t channel, std::string& message)
         message = "该通道测试已在后台进行";
         return true;
     }
+    wake_worker();
     return true;
 }
 

@@ -41,9 +41,10 @@
         html += '<div class="push-channel-header">';
         html += '<input type="checkbox" name="push' + idx + 'en" id="push' + idx + 'en" onchange="toggleChannel(' + idx + ')"' + (en ? ' checked' : '') + '>';
         html += '<label for="push' + idx + 'en" class="label-inline">启用推送通道 ' + (i + 1) + '</label>';
+        html += '<span class="ch-summary" id="chsum' + idx + '"></span>';
         html += '<button type="button" class="channel-fold" onclick="toggleChannelBody(' + idx + ')" id="foldBtn' + idx + '">展开</button>';
         html += '</div><div class="push-channel-body">';
-        html += '<div class="form-group"><label>通道名称</label><input type="text" name="push' + idx + 'name" value="' + htmlEsc(ch.name || defName) + '" placeholder="自定义名称"></div>';
+        html += '<div class="form-group"><label>通道名称</label><input type="text" name="push' + idx + 'name" value="' + htmlEsc(ch.name || defName) + '" placeholder="自定义名称" oninput="updateChannelSummary(' + idx + ')"></div>';
         html += '<div class="form-group"><label>推送方式</label><select name="push' + idx + 'type" id="push' + idx + 'type" onchange="updateTypeHint(' + idx + ')">' + pushTypeOptions(ch.type || 1) + '</select><div class="push-type-hint" id="hint' + idx + '"></div></div>';
         html += '<div class="form-group"><label id="urllabel' + idx + '">推送URL/Webhook</label><input type="text" name="push' + idx + 'url" id="url' + idx + '" value="' + htmlEsc(ch.url || '') + '" placeholder="http://your-server.com/api 或 webhook地址"></div>';
         html += '<div id="extra' + idx + '" style="display:none;"><div class="form-group"><label id="key1label' + idx + '">参数1</label><input type="text" name="push' + idx + 'key1" id="key1' + idx + '" value="' + htmlEsc(ch.key1 || '') + '"></div>';
@@ -67,7 +68,7 @@
         html += '<div class="form-group"><label>其它参数</label><input type="text" id="bark_other' + idx + '" placeholder="markdown=...&ciphertext=..."></div>';
         html += '</div><p class="form-hint">保存时会自动合成为 Bark 参数；可用 {sender} {message} {timestamp} 占位符。</p></div></details></div>';
         html += '<div id="custom' + idx + '" style="display:none;"><div class="form-group"><label>请求体模板（使用 {sender} {message} {timestamp} 占位符）</label><textarea name="push' + idx + 'body" rows="4" style="width:100%;font-family:monospace;">' + htmlEsc(ch.customBody || '') + '</textarea></div></div>';
-        html += '<button type="button" class="btn btn-secondary btn-sm" onclick="testPush(' + idx + ')">测试推送</button><div class="result-box" id="pushTestResult' + idx + '"></div>';
+        html += '<button type="button" class="btn btn-secondary btn-sm" onclick="testPush(' + idx + ', this)">测试推送</button><div class="result-box" id="pushTestResult' + idx + '"></div>';
         html += '</div></div>';
       }
       return html;
@@ -244,6 +245,27 @@
         if (sel && parseInt(sel.value) === 2) serializeBarkParams(i);
       }
     }
+    // 折叠状态下也能看出通道是什么：header 显示"名称 · 类型"摘要
+    function pushTypeLabel(t) {
+      var m = {1:'POST JSON',2:'Bark',3:'GET',4:'钉钉',5:'PushPlus',6:'Server酱',7:'自定义',8:'飞书',9:'Gotify',10:'Telegram'};
+      return m[t] || '';
+    }
+    function updateChannelSummary(idx) {
+      var el = document.getElementById('chsum' + idx);
+      if (!el) return;
+      var nameEl = document.querySelector('[name="push' + idx + 'name"]');
+      var sel = document.getElementById('push' + idx + 'type');
+      var name = nameEl ? nameEl.value.trim() : '';
+      var t = sel ? pushTypeLabel(parseInt(sel.value)) : '';
+      if (name === '通道' + (idx + 1)) name = '';  // 默认名不重复显示
+      el.textContent = [name, t].filter(Boolean).join(' · ');
+    }
+    // 转发规则里按真实通道名显示（回退"通道N"）
+    function chanName(n) {
+      var arr = (webConfig && webConfig.pushChannels) || [];
+      var ch = arr[n - 1] || {};
+      return (ch.name || '').trim() || ('通道' + n);
+    }
     function updateTypeHint(idx) {
       var sel = document.getElementById('push' + idx + 'type');
       var hint = document.getElementById('hint' + idx);
@@ -251,6 +273,7 @@
       var custom = document.getElementById('custom' + idx);
       if (!sel || !hint || !extra || !custom) return;
       var type = parseInt(sel.value);
+      updateChannelSummary(idx);
       var bp = document.getElementById('barkParams' + idx);
       var ba = document.getElementById('barkAdvanced' + idx);
       extra.style.display = 'none'; custom.style.display = 'none';
@@ -317,7 +340,11 @@
     });
 
     // ---- Push Channel Test ----
-    var pushTestTimers = {};
+    var pushTestTimers = {}, pushTestBtns = {};
+    function pushTestDone(idx) {
+      var b = pushTestBtns[idx];
+      if (b) b.disabled = false;
+    }
     function pollTestPush(idx) {
       if (pushTestTimers[idx]) clearTimeout(pushTestTimers[idx]);
       fetch('/testpush?action=status&ch=' + idx).then(function(x){return x.json();}).then(function(d) {
@@ -328,15 +355,18 @@
           pushTestTimers[idx] = setTimeout(function(){ pollTestPush(idx); }, 3000);
           return;
         }
+        pushTestDone(idx);
         r.className = 'result-box ' + (d.success ? 'result-success' : 'result-error');
         r.textContent = d.message || (d.success ? '测试推送已发送' : '测试推送失败');
       }).catch(function(e){
+        pushTestDone(idx);
         var r = document.getElementById('pushTestResult' + idx);
         r.className = 'result-box result-error';
         r.textContent = '状态查询失败: ' + e;
       });
     }
-    function testPush(idx) {
+    function testPush(idx, btn) {
+      if (btn) { pushTestBtns[idx] = btn; btn.disabled = true; }  // 测试期间防重复点击
       var r = document.getElementById('pushTestResult' + idx);
       r.className = 'result-box result-loading'; r.textContent = '测试推送已提交（请先保存配置）...';
       fetch('/testpush?ch=' + idx, { method: 'POST' }).then(function(x){return x.json();}).then(function(d) {
@@ -344,10 +374,11 @@
           r.textContent = d.message || '后台测试推送中...';
           pollTestPush(idx);
         } else {
+          pushTestDone(idx);
           r.className = 'result-box result-error';
           r.textContent = d.message || '任务启动失败';
         }
-      }).catch(function(e){ r.className = 'result-box result-error'; r.textContent = '请求失败: ' + e; });
+      }).catch(function(e){ pushTestDone(idx); r.className = 'result-box result-error'; r.textContent = '请求失败: ' + e; });
     }
 
     // ---- USSD ----
@@ -478,29 +509,53 @@
     }
 
     // ---- AT Terminal ----
+    function atTime(){var d=new Date(),p=function(n){return('0'+n).slice(-2)};return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}
     function addLog(msg,type){
       type=type||'resp';var log=document.getElementById('atLog'),div=document.createElement('div'),b=document.createElement('b');
       if(!log)return;
+      var ts=document.createElement('span');ts.className='at-ts';ts.textContent='['+atTime()+'] ';
       if(type==='user'){b.style.color='#fff';b.textContent='> ';}
       else if(type==='error'){b.style.color='#f44336';b.textContent='! ';}
       else{b.style.color='#50e3c2';b.textContent='';}
-      div.appendChild(b);div.appendChild(document.createTextNode(msg));
+      div.appendChild(ts);div.appendChild(b);div.appendChild(document.createTextNode(msg));
       log.appendChild(div);log.scrollTop=log.scrollHeight;
     }
+    var atHistory=[],atHistPos=-1,atDraft='';
     function sendAT(){
       var inp=document.getElementById('atCmd');if(!inp)return;var cmd=inp.value.trim();if(!cmd)return;
-      var btn=document.getElementById('atBtn');btn.disabled=true;btn.textContent='...';
+      var btn=document.getElementById('atBtn');
+      if(btn&&btn.disabled)return;  // 上一条还在执行(含快捷指令入口)，避免并发 /at 请求堆积拖垮 httpd
+      if(atHistory[atHistory.length-1]!==cmd){atHistory.push(cmd);if(atHistory.length>30)atHistory.shift();}
+      atHistPos=-1;atDraft='';
+      btn.disabled=true;btn.textContent='...';
       addLog(cmd,'user');inp.value='';
       fetch('/at?cmd='+encodeURIComponent(cmd)).then(function(rr){return rr.json()}).then(function(d){
         addLog(d.message,d.success?'resp':'error');
       }).catch(function(e){addLog('网络错误: '+e,'error')}).finally(function(){btn.disabled=false;btn.textContent='发送';});
     }
+    function atQuick(cmd){var inp=document.getElementById('atCmd');if(!inp)return;inp.value=cmd;sendAT();}
     function clearATLog(){var l=document.getElementById('atLog');if(!l)return;l.innerHTML='';addLog('日志已清空','resp');}
     function bindAtTerminal(){
       var el = document.getElementById('atCmd');
       if (!el || el.dataset.bound) return;
       el.dataset.bound = '1';
-      el.addEventListener('keydown',function(e){if(e.key==='Enter')sendAT();});
+      el.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){sendAT();return;}
+        // ↑/↓ 翻阅历史命令(常用调试指令不用反复输入)；开始翻阅时暂存未发送的草稿，翻过头恢复
+        if(e.key==='ArrowUp'||e.key==='ArrowDown'){
+          if(!atHistory.length)return;
+          e.preventDefault();
+          if(e.key==='ArrowUp'){
+            if(atHistPos<0){atDraft=el.value;atHistPos=atHistory.length-1;}
+            else atHistPos=Math.max(0,atHistPos-1);
+          }else{
+            if(atHistPos<0)return;  // 没在翻历史，不动用户正在输入的内容
+            atHistPos+=1;
+          }
+          if(atHistPos>=atHistory.length){atHistPos=-1;el.value=atDraft;return;}
+          el.value=atHistory[atHistPos];
+        }
+      });
     }
 
     // ---- Log Viewer (进入页/手动刷新重放保留日志，自动刷新只追新增) ----
@@ -521,12 +576,29 @@
       var s = document.getElementById('logStatus');
       if (s) s.textContent = text || '';
     }
+    function logNearBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    }
     function renderLogView(emptyText) {
       var el = document.getElementById('logView');
       if (!el) return;
-      el.textContent = logLines.length ? logLines.join('\n') : (emptyText == null ? '(暂无日志)' : emptyText);
-      el.scrollTop = el.scrollHeight;
+      var fEl = document.getElementById('logFilter');
+      var q = (fEl && fEl.value || '').trim().toLowerCase();
+      var lines = q ? logLines.filter(function(l){ return l.toLowerCase().indexOf(q) >= 0; }) : logLines;
+      var stick = logNearBottom(el);  // 用户上翻查看历史时，自动刷新不把滚动条拖回底部
+      if (!lines.length) {
+        el.textContent = q ? '(无匹配日志)' : (emptyText == null ? '(暂无日志)' : emptyText);
+      } else {
+        // 先转义再拼接高亮 span，无注入风险
+        el.innerHTML = lines.map(function(l) {
+          var cls = /失败|错误|超时|异常|error|fail/i.test(l) ? ' err'
+                  : (/重试|警告|warn|降级|忽略/i.test(l) ? ' warn' : '');
+          return '<span class="log-line' + cls + '">' + htmlEsc(l) + '</span>';
+        }).join('\n');
+      }
+      if (stick) el.scrollTop = el.scrollHeight;  // 只有原本就在底部时才跟随，过滤/上翻期间不打扰
     }
+    function copyLogAll(btn) { copyText(logLines.join('\n'), btn); }
     function initLogPanel() {
       reloadLog();
       var auto = document.getElementById('logAuto');
@@ -674,6 +746,13 @@
       if (!ep) return '(无)';
       var d = new Date((ep + devTz * 60) * 1000), p = function(n){ return ('0' + n).slice(-2); };
       return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+    }
+    // 详情抽屉里用到秒的完整时间
+    function fmtEpochFull(ep) {
+      if (!ep) return '(无)';
+      var d = new Date((ep + devTz * 60) * 1000), p = function(n){ return ('0' + n).slice(-2); };
+      return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' +
+             p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds());
     }
     function fmtClockEpoch(ep) {
       if (!ep) return '--';
@@ -844,6 +923,8 @@
         if (!Array.isArray(arr)) arr = [];
         window.__msgFull = arr;                 // 全量缓存：搜索本地过滤，不再每按键请求
         window.__msgBox = sent ? 'sent' : 'recv';
+        var cnt = document.getElementById(sent ? 'cntSent' : 'cntRecv');
+        if (cnt) cnt.textContent = arr.length ? String(arr.length) : '';
         renderMessages();
       }).catch(function() { box.textContent = '无法获取短信'; });
     }
@@ -884,7 +965,8 @@
           h.appendChild(s); h.appendChild(right);
           var t = document.createElement('div'); t.className = 'msg-time';
           t.textContent = fmtEpoch(sent ? m.sent : m.recv);
-          var b = document.createElement('div'); b.className = 'msg-body';
+          // 列表里长正文折叠到 4 行(点开抽屉看全文)，避免一条长短信占满整屏
+          var b = document.createElement('div'); b.className = 'msg-body clamp';
           var body = htmlEsc(m.text || '');
           if (otp) body = body.replace(otp, '<mark>' + otp + '</mark>');  // otp 为纯数字，先转义再高亮，无注入风险
           b.innerHTML = body;
@@ -1004,7 +1086,7 @@
       fwdRules.forEach(function(r, i) {
         var d = document.createElement('div'); d.className = 'push-channel enabled'; d.style.marginBottom = '10px';
         var typeOpts = [['kw','关键词(子串)'],['re','正文正则'],['from','发件人正则']].map(function(o){return '<option value="'+o[0]+'"'+(r.type===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('');
-        var chans = ''; for (var c = 1; c <= 5; c++) chans += '<label style="margin-right:12px;font-size:12px;white-space:nowrap;"><input type="checkbox" data-ch="'+c+'"'+(r.chans[c]?' checked':'')+(r.drop?' disabled':'')+'> 通道'+c+'</label>';
+        var chans = ''; for (var c = 1; c <= 5; c++) chans += '<label style="margin-right:12px;font-size:12px;white-space:nowrap;"><input type="checkbox" data-ch="'+c+'"'+(r.chans[c]?' checked':'')+(r.drop?' disabled':'')+'> '+htmlEsc(chanName(c))+'</label>';
         d.innerHTML =
           '<div class="push-channel-header"><b style="font-family:var(--mono);color:var(--amber);">'+(i+1<10?'0':'')+(i+1)+'</b>'+
           '<label style="font-size:12px;"><input type="checkbox" class="rEn"'+(r.enabled?' checked':'')+'> 启用</label>'+
@@ -1029,6 +1111,60 @@
         box.appendChild(d);
       });
     }
+    // ---- 规则本地测试：镜像固件 eval_forward_rules + 派发门控（自上而下首条命中即止）----
+    // 浏览器用 JS 正则预览，与设备端 POSIX ERE 在个别语法上可能有差异
+    // 按固件派发逻辑折算实际会发出的目标：推送总开关、通道启用、邮件启用+配置齐全
+    function deliverTargets(useEmail, chanMask) {
+      var c = webConfig || {}, arr = c.pushChannels || [];
+      var out = [], skipped = [];
+      for (var n = 1; n <= 5; n++) {
+        if (!chanMask[n]) continue;
+        if (!c.pushEnabled) skipped.push(chanName(n) + '(推送总开关已关)');
+        else if (!(arr[n - 1] || {}).enabled) skipped.push(chanName(n) + '(通道未启用)');
+        else out.push(chanName(n));
+      }
+      if (useEmail) {
+        if (!c.emailEnabled) skipped.push('邮件(邮件转发已关)');
+        else if (!c.emailConfigured) skipped.push('邮件(SMTP 未配置齐全)');
+        else out.push('邮件');
+      }
+      return { out: out, skipped: skipped };
+    }
+    function testRules() {
+      serializeRules();
+      var from = (document.getElementById('rtFrom').value || '').trim();
+      var text = document.getElementById('rtText').value || '';
+      var r = document.getElementById('rtResult');
+      if (!text && !from) { r.className = 'result-box result-error'; r.textContent = '请先填写测试发件人或正文'; return; }
+      for (var i = 0; i < fwdRules.length; i++) {
+        var rule = fwdRules[i];
+        if (!rule.enabled || !rule.pattern) continue;
+        var hit = false;
+        if (rule.type === 'kw') {
+          hit = text.indexOf(rule.pattern) >= 0;
+        } else {
+          try { hit = new RegExp(rule.pattern, 'i').test(rule.type === 'from' ? from : text); }
+          catch (e) { r.className = 'result-box result-error'; r.textContent = '规则 ' + (i + 1) + ' 的正则浏览器无法解析，请检查语法：' + e.message; return; }
+        }
+        if (!hit) continue;
+        if (rule.drop) {
+          r.className = 'result-box result-error';
+          r.textContent = '命中规则 ' + (i + 1) + ' → 丢弃(不转发)';
+          return;
+        }
+        var d = deliverTargets(rule.email, rule.chans);
+        var msg = '命中规则 ' + (i + 1) + ' → ' + (d.out.length ? '实际转发到：' + d.out.join('、') : '没有可用转发目标(该短信不会被转发)');
+        if (d.skipped.length) msg += '；跳过：' + d.skipped.join('、');
+        r.className = 'result-box ' + (d.out.length ? 'result-success' : 'result-error');
+        r.textContent = msg;
+        return;
+      }
+      // 未命中：固件默认转发到全部启用通道 + 邮件(各自仍受开关/配置门控)
+      var all = {}; for (var n = 1; n <= 5; n++) all[n] = true;
+      var dd = deliverTargets(true, all);
+      r.className = 'result-box ' + (dd.out.length ? 'result-info' : 'result-error');
+      r.textContent = '未命中任何规则 → ' + (dd.out.length ? '按默认策略实际转发到：' + dd.out.join('、') : '没有可用转发目标(该短信不会被转发)');
+    }
 
     // ---- 短信详情抽屉(点击展开) ----
     function openMsgDrawer(id) {
@@ -1038,21 +1174,39 @@
       var sent = (box === 'sent');
       var who = sent ? (m.target || '(未知)') : (m.sender || '(未知)');
       var otp = sent ? '' : otpExtract(m.text || '');
-      var h = '<div class="dk">' + (sent ? '目标' : '发件人') + '</div><div class="dv">' + htmlEsc(who) + '</div>';
-      h += '<div class="dk">时间</div><div class="dv">' + fmtEpoch(sent ? m.sent : m.recv) + '</div>';
+      var h = '<div class="dk">' + (sent ? '目标' : '发件人') + '</div>' +
+              '<div class="dv">' + htmlEsc(who) + ' <span class="msg-chip" id="drawerCopyWho" style="cursor:pointer;">复制号码</span></div>';
+      h += '<div class="dk">时间</div><div class="dv">' + fmtEpochFull(sent ? m.sent : m.recv) + '</div>';
       h += '<div class="dk">状态</div><div class="dv">' + (sent ? (m.ok ? '发送成功' : '发送失败') : (m.fwd ? '已处理' : '待处理')) + '</div>';
+      h += '<div class="dk">正文长度</div><div class="dv">' + String((m.text || '').length) + ' 字符</div>';
       if (otp) h += '<div class="dk">验证码</div><div class="dv"><span class="otpcode" onclick="copyText(\'' + otp + '\', this)">' + otp + '</span></div>';
       var bh = htmlEsc(m.text || ''); if (otp) bh = bh.replace(otp, '<mark>' + otp + '</mark>');
       h += '<div class="dfull">' + bh + '</div><div class="btn-row">';
       if (!sent) h += '<button class="btn btn-primary btn-sm" onclick="resendMsg(' + id + ')">重发转发</button>';
       if (!sent) h += '<button class="btn btn-danger btn-sm" onclick="deleteMsg(' + id + ')">删除</button>';
+      if (sent) h += '<button class="btn btn-primary btn-sm" id="drawerSendAgain">再发一次</button>';
       h += '<button class="btn btn-secondary btn-sm" id="drawerCopyFull">复制全文</button></div><div class="result-box" id="drawerRes"></div>';
       document.getElementById('drawerBody').innerHTML = h;
       var cf = document.getElementById('drawerCopyFull'); if (cf) cf.onclick = function(){ copyText(m.text || '', cf); };
+      var cw = document.getElementById('drawerCopyWho'); if (cw) cw.onclick = function(){ copyText(who, cw); };
+      // 已发送短信一键回填到发送弹窗，改两个字就能再发
+      var sa = document.getElementById('drawerSendAgain');
+      if (sa) sa.onclick = function() {
+        closeMsgDrawer();
+        openSmsModal();
+        document.getElementById('smsPhone').value = m.target || '';
+        var c = document.getElementById('smsContent');
+        c.value = m.text || '';
+        updateCount(c);
+      };
       document.getElementById('msgDrawer').classList.add('show');
       document.getElementById('drawerBg').classList.add('show');
     }
     function closeMsgDrawer() { document.getElementById('msgDrawer').classList.remove('show'); document.getElementById('drawerBg').classList.remove('show'); }
+    // Esc 关闭抽屉/发短信弹窗
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { closeMsgDrawer(); closeSmsModal(); }
+    });
     function resendMsg(id) {
       var r = document.getElementById('drawerRes'); r.className = 'result-box result-loading'; r.textContent = '重发中...';
       fetch('/resend?id=' + id, { method: 'POST' }).then(function(x){return x.json();}).then(function(d) {

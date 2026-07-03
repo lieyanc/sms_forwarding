@@ -9,7 +9,7 @@
 #include "esp_err.h"
 
 static constexpr int IDF_MAX_PUSH_CHANNELS = 5;
-static constexpr const char* IDF_FW_VERSION = "1.0.3";
+static constexpr const char* IDF_FW_VERSION = "1.0.4";
 static constexpr const char* IDF_DEFAULT_WEB_USER = "admin";
 static constexpr const char* IDF_DEFAULT_WEB_PASS = "admin123";
 static constexpr const char* IDF_KEEPALIVE_DEFAULT_URL = "http://gg.incrafttime.top/api/payload?size=64342";
@@ -76,7 +76,22 @@ esp_err_t idf_config_import_text(const std::string& text, int* applied_count);
 esp_err_t idf_config_factory_reset(void);
 esp_err_t idf_config_set_keepalive_last(uint32_t epoch);
 
+// /status 高频轮询(2s)专用窄快照：只拷贝状态页用到的字段，
+// 避免每次请求做全量配置深拷贝造成持续堆抖动
+struct IdfConfigStatusView {
+    int tzOffsetMin = 480;
+    bool dataEnabled = false;
+    bool emailEnabled = true;
+    bool pushEnabled = true;
+    bool emailConfigured = false;
+    int pushEnabledCount = 0;
+    std::string adminPhone;
+    std::string phoneNumber;
+    std::string apn;
+};
+
 IdfConfig idf_config_get(void);
+IdfConfigStatusView idf_config_get_status_view(void);
 bool idf_config_has_sta_credentials(void);
 int idf_config_enabled_push_count(void);
 bool idf_config_email_configured(void);

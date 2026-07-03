@@ -228,11 +228,13 @@ static esp_err_t handle_ui_panel(httpd_req_t* req)
 static esp_err_t handle_status(httpd_req_t* req)
 {
     if (!check_auth(req)) return ESP_OK;
+    idf_modem_note_web_poll();  // 概览页在看时，模组信号采样自动提频
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
-    const IdfConfig& cfg = idf_config_get();
+    // 窄快照：/status 每 2s 轮询一次，避免全量配置深拷贝造成持续堆抖动
+    const IdfConfigStatusView cfg = idf_config_get_status_view();
     IdfWifiStatus wifi = idf_wifi_get_status();
     IdfModemStatus modem = idf_modem_get_status();
     IdfSmsStatus sms = idf_sms_get_status();
@@ -316,9 +318,9 @@ static esp_err_t handle_status(httpd_req_t* req)
              "\"pushEnabled\":%s,\"pushEnabledCount\":%d,\"apMode\":%s,",
              cfg.dataEnabled ? "true" : "false",
              cfg.emailEnabled ? "true" : "false",
-             idf_config_email_configured() ? "true" : "false",
+             cfg.emailConfigured ? "true" : "false",
              cfg.pushEnabled ? "true" : "false",
-             idf_config_enabled_push_count(),
+             cfg.pushEnabledCount,
              wifi.apMode ? "true" : "false");
     body += buf;
 
@@ -891,6 +893,9 @@ static esp_err_t handle_import_config(httpd_req_t* req)
 static void restart_task(void*)
 {
     vTaskDelay(pdMS_TO_TICKS(1200));
+    // 计划内重启先给模组断电：保留"重启设备可救活已卡死模组"的原有语义，
+    // 模组热启动快路径只留给崩溃/看门狗等意外复位
+    idf_modem_power_off_for_restart();
     esp_restart();
 }
 
@@ -1501,6 +1506,7 @@ static void scheduler_task(void*)
             idf_logf("空闲堆低于阈值(%u<20000)，准备有序重启",
                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
             vTaskDelay(pdMS_TO_TICKS(300));
+            idf_modem_power_off_for_restart();
             esp_restart();
         }
 
@@ -1542,6 +1548,8 @@ static void scheduler_task(void*)
                 rb_last_day = day;
                 idf_log_line("每日定时重启...");
                 vTaskDelay(pdMS_TO_TICKS(300));
+                // 每日重启是无人值守设备的兜底自愈手段，必须连模组一起冷启动
+                idf_modem_power_off_for_restart();
                 esp_restart();
             }
         }

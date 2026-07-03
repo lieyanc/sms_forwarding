@@ -272,9 +272,31 @@
     }
     .log-toolbar { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 8px; }
     .log-toolbar .btn { flex: 0 0 auto; }
+    .log-toolbar .form-input { padding: 5px 9px; font-size: 12px; font-family: var(--mono); }
     .log-auto { margin-left: 4px; font-size: 13px; cursor: pointer; color: var(--body); }
     .log-auto input { margin-right: 4px; accent-color: var(--amber); }
     .log-status { margin-top: 7px; font: 11px/1.5 var(--mono); color: var(--faint); }
+    .log-line.err { color: #f48771; }
+    .log-line.warn { color: #e8b23a; }
+
+    /* AT 终端：快捷指令 + 时间戳 */
+    .at-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+    .at-chip { background: var(--canvas-soft); border: 1px solid var(--hairline-strong); color: var(--body);
+      border-radius: var(--radius-sm); padding: 4px 10px; font: 500 11.5px/1 var(--mono); cursor: pointer; }
+    .at-chip:hover { border-color: var(--amber-dim); color: var(--amber); }
+    .at-ts { color: var(--faint); font-size: 10.5px; }
+
+    /* 收发短信：tab 计数 + 列表长正文折叠 */
+    .tab-cnt { margin-left: 5px; font: 600 10px/1 var(--mono); color: var(--faint); }
+    .msg-tab.active .tab-cnt { color: var(--amber); }
+    .msg-body.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+
+    /* 推送通道 header 摘要（折叠时可辨识通道内容） */
+    .ch-summary { margin-left: 8px; font: 500 11px/1.3 var(--mono); color: var(--faint);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 42%; }
+
+    /* 转发规则测试器 */
+    .rule-tester { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--hairline-strong); }
 
     /* Responsive */
     @media (max-width: 700px) {

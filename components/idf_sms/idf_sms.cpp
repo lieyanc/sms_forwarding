@@ -225,6 +225,9 @@ static void admin_reset_task(void*)
     idf_modem_request_reset(true);
     vTaskDelay(pdMS_TO_TICKS(1500));
     idf_log_line("正在重启ESP32...");
+    // RESET 命令语义是"模组+ESP32 都彻底重启"：确保模组断电后再重启 ESP，
+    // 避免热启动快路径把它当健康模组沿用
+    idf_modem_power_off_for_restart();
     esp_restart();
 }
 
@@ -775,7 +778,8 @@ static void sms_task(void*)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // 事件等待：URC 到达/网页短信入队立即唤醒；无事件 500ms 兜底(与原轮询节奏一致)
+        idf_modem_wait_event(500);
     }
 }
 
@@ -880,6 +884,7 @@ esp_err_t idf_sms_enqueue_outgoing(const std::string& phone_raw, const std::stri
     int depth = outgoing_depth_locked();
     xSemaphoreGive(s_out_mutex);
 
+    idf_modem_signal_event();  // 唤醒短信任务立即出队发送，不等轮询周期
     idf_logf("网页短信已入队，当前待发=%d", depth);
     message = "已加入发送队列，请稍后在已发送列表查看结果";
     return ESP_OK;

@@ -14,6 +14,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "idf_log.h"
@@ -37,10 +38,19 @@ static constexpr uint32_t MODEM_DATA_MODE_RETRY_GAP_MS = 10000UL;
 static constexpr uint8_t MODEM_DATA_MODE_RETRY_MAX = 3;
 static constexpr uint32_t SIGNAL_DETAIL_INTERVAL_MS = 120000UL;
 static constexpr uint32_t IDENTITY_RETRY_INTERVAL_MS = 600000UL;
+// 概览页打开(在轮询 /status)期间的提频采样间隔：网页显示与真实信号更贴近；
+// 采样仍受 at_channel_idle 门控，不与收发/保号抢 AT 通道
+static constexpr uint32_t SIGNAL_INTERVAL_WEB_MS = 10000UL;
+static constexpr uint32_t SIGNAL_DETAIL_INTERVAL_WEB_MS = 30000UL;
+static constexpr int64_t WEB_POLL_ACTIVE_WINDOW_US = 15LL * 1000LL * 1000LL;
 
 static SemaphoreHandle_t s_at_mutex = nullptr;
 static SemaphoreHandle_t s_status_mutex = nullptr;
 static SemaphoreHandle_t s_urc_mutex = nullptr;
+// UART 驱动事件队列：URC 一到就唤醒模组任务抓取，替代固定 500ms 轮询延时
+static QueueHandle_t s_uart_evt_queue = nullptr;
+// 模组事件信号：新 URC 入缓冲/网页短信入队时唤醒短信任务，消除轮询等待
+static SemaphoreHandle_t s_event_sem = nullptr;
 static IdfModemStatus s_status;
 static std::string s_urc_buffer;
 static bool s_started = false;
@@ -56,6 +66,9 @@ static int s_logged_sinr = 999;
 static bool s_logged_detail_valid = false;
 static bool s_identity_static_attempted = false;
 static bool s_identity_network_attempted = false;
+static std::atomic<int64_t> s_last_web_poll_us{-WEB_POLL_ACTIVE_WINDOW_US};
+
+void idf_modem_signal_event(void);
 
 static std::string trim(std::string value)
 {
@@ -296,6 +309,7 @@ static void append_urc_text(const std::string& text)
     }
     s_urc_buffer += text;
     xSemaphoreGive(s_urc_mutex);
+    idf_modem_signal_event();  // 立即唤醒短信任务处理，不等它的轮询周期
 }
 
 static void capture_pending_uart_locked(uint32_t max_ms)
@@ -319,12 +333,14 @@ static void capture_pending_uart_locked(uint32_t max_ms)
     if (!pending.empty()) append_urc_text(pending);
 }
 
-static void poll_unsolicited_uart(uint32_t max_ms)
+// 返回是否成功抢到 AT 通道锁并完成抓取；false=通道正被长任务占用
+static bool poll_unsolicited_uart(uint32_t max_ms)
 {
-    if (!s_at_mutex) return;
-    if (xSemaphoreTake(s_at_mutex, 0) != pdTRUE) return;
+    if (!s_at_mutex) return false;
+    if (xSemaphoreTake(s_at_mutex, 0) != pdTRUE) return false;
     capture_pending_uart_locked(max_ms);
     xSemaphoreGive(s_at_mutex);
+    return true;
 }
 
 static bool at_channel_idle_now(void)
@@ -1381,7 +1397,7 @@ static bool sample_identity_once(bool log_summary = false, bool include_network_
     return changed;
 }
 
-static void modem_power_cycle(void)
+static void modem_en_gpio_init(void)
 {
     gpio_config_t io = {};
     io.pin_bit_mask = 1ULL << MODEM_EN;
@@ -1390,6 +1406,21 @@ static void modem_power_cycle(void)
     io.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io);
+}
+
+// 只拉高 EN 保持/接通供电，不做断电周期(热启动探测用)。
+// 先写输出寄存器再配方向：gpio_config 切到输出的瞬间即输出高，
+// 避免默认输出 0 造成 EN 瞬时拉低、给在运行的模组一个断电毛刺
+static void modem_power_hold_on(void)
+{
+    gpio_set_level(MODEM_EN, 1);
+    modem_en_gpio_init();
+    gpio_set_level(MODEM_EN, 1);
+}
+
+static void modem_power_cycle(void)
+{
+    modem_en_gpio_init();
 
     set_phase("powering");
     gpio_set_level(MODEM_EN, 0);
@@ -1494,10 +1525,16 @@ static void modem_task(void*)
     update_status(patch);
     reset_identity_sampling_state();
 
-    // 启动握手：失败绝不放弃(Arduino 版靠 modemHealthTick 无限恢复)。任务一旦退出，
-    // 网页重启模组、URC 轮询、健康探测全部失效，设备只能整机断电才能恢复。
-    modem_power_cycle();
-    {
+    // 热启动快路径：先拉高 EN 保持供电并直接探测 AT。ESP32 软重启(网页重启/每日
+    // 定时重启/OTA)后模组通常仍在正常运行，跳过 2.7s 断电上电，短信收发更快恢复；
+    // 冷上电时 EN 从 t=0 就拉高，模组提前开始开机，探测不到再走完整上电重试(行为不变)。
+    modem_power_hold_on();
+    if (wait_at_ready()) {
+        idf_log_line("模组已在运行，跳过断电上电(热启动)");
+    } else {
+        // 启动握手：失败绝不放弃(Arduino 版靠 modemHealthTick 无限恢复)。任务一旦退出，
+        // 网页重启模组、URC 轮询、健康探测全部失效，设备只能整机断电才能恢复。
+        modem_power_cycle();
         int round = 0;
         uint32_t retry_gap_ms = 5000;
         while (!wait_at_ready()) {
@@ -1569,11 +1606,16 @@ static void modem_task(void*)
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
-        if (now - last_signal > pdMS_TO_TICKS(30000) && at_channel_idle_now()) {
+        // 概览页正被轮询时提频采样(10s/30s)，网页显示的信号更实时；无人查看恢复 30s/120s
+        bool web_active = (esp_timer_get_time() -
+                           s_last_web_poll_us.load(std::memory_order_relaxed)) < WEB_POLL_ACTIVE_WINDOW_US;
+        uint32_t signal_interval_ms = web_active ? SIGNAL_INTERVAL_WEB_MS : 30000UL;
+        uint32_t detail_interval_ms = web_active ? SIGNAL_DETAIL_INTERVAL_WEB_MS : SIGNAL_DETAIL_INTERVAL_MS;
+        if (now - last_signal > pdMS_TO_TICKS(signal_interval_ms) && at_channel_idle_now()) {
             sample_signal_once();
             last_signal = now;
         }
-        if (now - last_detail > pdMS_TO_TICKS(SIGNAL_DETAIL_INTERVAL_MS) && at_channel_idle_now()) {
+        if (now - last_detail > pdMS_TO_TICKS(detail_interval_ms) && at_channel_idle_now()) {
             sample_signal_detail_once();
             last_detail = now;
         }
@@ -1624,8 +1666,19 @@ static void modem_task(void*)
             }
         }
         for (int i = 0; i < 10; ++i) {
-            poll_unsolicited_uart(20);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            // 事件驱动等待：UART 一有数据(URC/短信直推)立刻醒来抓取；
+            // 无事件时 500ms 超时兜底轮询，节奏与原轮询一致
+            uart_event_t evt;
+            if (s_uart_evt_queue) {
+                if (xQueueReceive(s_uart_evt_queue, &evt, pdMS_TO_TICKS(500)) == pdTRUE) {
+                    while (xQueueReceive(s_uart_evt_queue, &evt, 0) == pdTRUE) {}  // 合并积压事件
+                }
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+            // AT 通道被长任务(保号下载/大批量 CMGL)占用时抢不到锁：小睡再试，
+            // 避免下载期间每个 RX 块事件都空转唤醒(数据由持锁方消费，URC 也由其转存)
+            if (!poll_unsolicited_uart(20)) vTaskDelay(pdMS_TO_TICKS(100));
             // 重启请求/AT恢复补初始化尽快响应，不等满 5s 轮询窗
             if (s_reset_request.load(std::memory_order_relaxed) != 0) break;
         }
@@ -1638,7 +1691,8 @@ esp_err_t idf_modem_start(const IdfConfig& config)
     s_at_mutex = xSemaphoreCreateMutex();
     s_status_mutex = xSemaphoreCreateMutex();
     s_urc_mutex = xSemaphoreCreateMutex();
-    if (!s_at_mutex || !s_status_mutex || !s_urc_mutex) return ESP_ERR_NO_MEM;
+    if (!s_event_sem) s_event_sem = xSemaphoreCreateBinary();
+    if (!s_at_mutex || !s_status_mutex || !s_urc_mutex || !s_event_sem) return ESP_ERR_NO_MEM;
     if (!config.dataEnabled) set_status_cell_ip("");
     load_identity_cache();
 
@@ -1650,7 +1704,8 @@ esp_err_t idf_modem_start(const IdfConfig& config)
     uart_cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     uart_cfg.source_clk = UART_SCLK_DEFAULT;
 
-    esp_err_t err = uart_driver_install(MODEM_UART, UART_RX_BUF, 0, 0, nullptr, 0);
+    // 带事件队列安装：RX 数据到达即产生事件，模组任务空闲期可被立刻唤醒
+    esp_err_t err = uart_driver_install(MODEM_UART, UART_RX_BUF, 0, 16, &s_uart_evt_queue, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART driver install failed: %s", esp_err_to_name(err));
         idf_logf("模组 UART 驱动安装失败: %s", esp_err_to_name(err));
@@ -1661,6 +1716,7 @@ esp_err_t idf_modem_start(const IdfConfig& config)
         ESP_LOGE(TAG, "UART param config failed: %s", esp_err_to_name(err));
         idf_logf("模组 UART 参数配置失败: %s", esp_err_to_name(err));
         uart_driver_delete(MODEM_UART);
+        s_uart_evt_queue = nullptr;
         return err;
     }
     err = uart_set_pin(MODEM_UART, MODEM_TXD, MODEM_RXD, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
@@ -1668,6 +1724,7 @@ esp_err_t idf_modem_start(const IdfConfig& config)
         ESP_LOGE(TAG, "UART pin config failed: %s", esp_err_to_name(err));
         idf_logf("模组 UART 引脚配置失败: %s", esp_err_to_name(err));
         uart_driver_delete(MODEM_UART);
+        s_uart_evt_queue = nullptr;
         return err;
     }
     uart_flush_input(MODEM_UART);
@@ -1677,6 +1734,7 @@ esp_err_t idf_modem_start(const IdfConfig& config)
     if (ok != pdPASS) {
         s_started = false;
         uart_driver_delete(MODEM_UART);
+        s_uart_evt_queue = nullptr;
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -1704,6 +1762,35 @@ esp_err_t idf_modem_request_reset(bool hard_reset)
 bool idf_modem_at_idle(void)
 {
     return at_channel_idle_now();
+}
+
+void idf_modem_note_web_poll(void)
+{
+    s_last_web_poll_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+}
+
+void idf_modem_power_off_for_restart(void)
+{
+    // 先写输出寄存器再配方向，切到输出的瞬间即输出低
+    gpio_set_level(MODEM_EN, 0);
+    modem_en_gpio_init();
+    gpio_set_level(MODEM_EN, 0);
+    // 保证断电时间足够(与 modem_power_cycle 一致)，ESP 重启后是干净的模组冷启动
+    vTaskDelay(pdMS_TO_TICKS(MODEM_POWERDOWN_MS));
+}
+
+bool idf_modem_wait_event(uint32_t timeout_ms)
+{
+    if (!s_event_sem) {
+        vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+        return false;
+    }
+    return xSemaphoreTake(s_event_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void idf_modem_signal_event(void)
+{
+    if (s_event_sem) xSemaphoreGive(s_event_sem);
 }
 
 bool idf_modem_take_urc(std::string& out)

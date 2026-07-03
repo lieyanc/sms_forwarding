@@ -14,6 +14,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write  # 发布 Release 需要
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,18 +29,60 @@ jobs:
       - name: Verify generated web assets
         run: python tools/build_web_assets.py --check
 
+      - name: Read firmware version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep -oP 'IDF_FW_VERSION = "\K[0-9A-Za-z.\-]+' components/idf_config/include/idf_config.h)
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "固件版本: $VERSION"
+
       - name: Build firmware
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
           idf.py -B build/idf -D SDKCONFIG=build/sdkconfig build
 
+      - name: Package release binaries
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          V=${{ steps.version.outputs.version }}
+          mkdir -p dist
+          # OTA 升级包：网页"固件升级"直接上传这个（仅 app 分区镜像）
+          cp build/idf/sms_forwarding_idf.bin "dist/sms_forwarder_ota_v${V}.bin"
+          # 整机烧录包：bootloader+分区表+app 合并为单文件，esptool 从 0x0 烧录即可
+          esptool.py --chip esp32c3 merge_bin -o "dist/sms_forwarder_full_v${V}.bin" \
+            0x0 build/idf/bootloader/bootloader.bin \
+            0x8000 build/idf/partition_table/partition-table.bin \
+            0x10000 build/idf/sms_forwarding_idf.bin
+          ls -l dist/
+
       - name: Upload firmware artifact (7-day retention)
         uses: actions/upload-artifact@v4
         with:
           name: esp-idf-firmware-bin
           path: |
+            dist/*.bin
             build/idf/sms_forwarding_idf.bin
             build/idf/bootloader/bootloader.bin
             build/idf/partition_table/partition-table.bin
           retention-days: 7
+
+      # 推送到 master 时自动发布/更新 Release：tag 为 v<版本号>，附可直接下载的固件。
+      # 同版本再次推送会更新既有 Release 的附件（覆盖同名文件），不会重复建 Release。
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: 固件 v${{ steps.version.outputs.version }}
+          files: dist/*.bin
+          body: |
+            SMS Forwarder ESP-IDF 固件 **v${{ steps.version.outputs.version }}**（构建自 `${{ github.sha }}`）
+
+            | 文件 | 用途 |
+            | --- | --- |
+            | `sms_forwarder_ota_v${{ steps.version.outputs.version }}.bin` | 网页「固件升级」页直接上传（OTA，无需数据线） |
+            | `sms_forwarder_full_v${{ steps.version.outputs.version }}.bin` | 整机烧录：`esptool.py --chip esp32c3 write_flash 0x0 <文件>` |
