@@ -31,7 +31,7 @@
         <div class="card">
           <div class="card-header">NET 指示灯</div>
           <div class="card-body">
-            <label class="schedule-switch"><input type="checkbox" name="netLedEnabled" %NETLED_CHECKED%> 启用模组 NET 指示灯</label>
+            <label class="switch-row"><span class="switch-text">启用模组 NET 指示灯</span><input type="checkbox" class="switch-input" name="netLedEnabled" %NETLED_CHECKED%><span class="switch-slider"></span></label>
             <div class="btn-row"><button type="button" class="btn btn-secondary" onclick="netLedTemp(false)">立即关闭</button><button type="button" class="btn btn-secondary" onclick="netLedTemp(true)">立即开启</button></div>
             <p class="form-hint">按钮立即下发不改配置；模组自身会记住状态，设备重启/模组重新初始化时固件会按上面保存的设置重新下发覆盖</p>
             <button type="submit" class="btn btn-primary btn-block" style="margin-top:4px;">保存指示灯设置</button>

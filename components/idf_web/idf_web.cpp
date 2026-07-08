@@ -476,11 +476,12 @@ static esp_err_t send_config_json(httpd_req_t* req)
     json_prop(body, "ntpServer", cfg.ntpServer); body += ",";
     snprintf(buf, sizeof(buf),
              "\"tzOffsetMin\":%d,\"rebootEnabled\":%s,\"rebootHour\":%d,"
-             "\"hbEnabled\":%s,\"hbHour\":%d,\"dataEnabled\":%s,",
+             "\"hbEnabled\":%s,\"hbHour\":%d,\"dataEnabled\":%s,\"roamingEnabled\":%s,",
              cfg.tzOffsetMin,
              cfg.rebootEnabled ? "true" : "false", cfg.rebootHour,
              cfg.hbEnabled ? "true" : "false", cfg.hbHour,
-             cfg.dataEnabled ? "true" : "false");
+             cfg.dataEnabled ? "true" : "false",
+             cfg.roamingEnabled ? "true" : "false");
     body += buf;
     json_prop(body, "apn", cfg.apn); body += ",";
     json_prop(body, "phoneNumber", cfg.phoneNumber); body += ",";
@@ -963,6 +964,8 @@ static esp_err_t handle_modem_control(httpd_req_t* req)
         }
     } else if (action == "operator") {
         std::string resp;
+        // 先选长名称格式，否则自动模式下 COPS? 只回模式位(+COPS: 0)，读不到运营商名
+        idf_modem_send_at("AT+COPS=3,0", 3000, resp);
         esp_err_t err = idf_modem_send_at("AT+COPS?", 5000, resp);
         std::string line = first_line_containing(resp, "+COPS:");
         if (err == ESP_OK && !line.empty()) {
@@ -1051,6 +1054,7 @@ struct ModemApplyTaskArg {
     bool dataChanged = false;
     bool operatorChanged = false;
     bool dataEnabled = false;
+    bool roamingEnabled = true;
     std::string apn;
     std::string operatorPlmn;
 };
@@ -1061,6 +1065,7 @@ static void modem_apply_task(void* raw)
     bool data_changed = arg->dataChanged;
     bool operator_changed = arg->operatorChanged;
     bool data_enabled = arg->dataEnabled;
+    bool roaming_enabled = arg->roamingEnabled;
     std::string apn = std::move(arg->apn);
     std::string operator_plmn = std::move(arg->operatorPlmn);
     delete arg;
@@ -1113,7 +1118,11 @@ static void modem_apply_task(void* raw)
     }
 
     if (data_changed) {
-        if (data_enabled) {
+        if (data_enabled && !roaming_enabled && modem.ceregStat == 5) {
+            // 数据漫游关闭且当前漫游：不激活蜂窝数据(短信仍走 CS/IMS 不受影响)
+            idf_modem_send_at("AT+CGACT=0,1", 5000, resp);
+            idf_log_line("数据漫游已关闭：当前处于漫游，未激活蜂窝数据(不跑流量)");
+        } else if (data_enabled) {
             if (!apn.empty() && apn_valid_for_at(apn)) {
                 std::string cmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
                 idf_modem_send_at(cmd, 3000, resp);
@@ -1344,11 +1353,14 @@ static esp_err_t handle_save(httpd_req_t* req)
     if (sim_form) {
         IdfSimSettingsView before = idf_config_get_sim_settings_view();
         esp_err_t err = idf_config_save_sim(has_field(fields, "dataEnabled"),
+                                            has_field(fields, "roamingEnabled"),
                                             field_text(fields, "apn"),
-                                            field_text(fields, "operatorPlmn"));
+                                            field_text(fields, "operatorPlmn"),
+                                            field_text(fields, "phoneNumber"));
         if (err != ESP_OK) return fail(err);
         IdfSimSettingsView after = idf_config_get_sim_settings_view();
-        bool data_changed = before.dataEnabled != after.dataEnabled || before.apn != after.apn;
+        bool data_changed = before.dataEnabled != after.dataEnabled || before.apn != after.apn ||
+                            before.roamingEnabled != after.roamingEnabled;
         bool operator_changed = before.operatorPlmn != after.operatorPlmn;
 
         httpd_resp_set_type(req, "text/plain");
@@ -2046,6 +2058,10 @@ static void esim_task(void* arg_raw)
     }
 
     bool ok = (err == ESP_OK);
+    // 启用/切换/禁用改变当前生效的卡：让模组重读号码/ICCID/运营商，避免概览沿用旧卡缓存
+    if (ok && (action == "enable" || action == "switch" || action == "disable")) {
+        idf_modem_invalidate_sim_identity();
+    }
     bool cache_ready = false;
     if (ok && action != "refresh" && action != "info") {
         std::string refresh_msg;

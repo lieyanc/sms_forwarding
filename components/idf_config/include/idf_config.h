@@ -75,6 +75,7 @@ struct IdfConfig {
 
     bool netLedEnabled = true;  // 模组 NET 指示灯(AT+MNETLIGHT)，关闭后重启依然保持
     bool dataEnabled = false;
+    bool roamingEnabled = true;  // 允许数据漫游(同手机"数据漫游")：关闭后漫游中不激活蜂窝数据
     std::string apn;
     std::string operatorPlmn;
     std::string phoneNumber;
@@ -102,8 +103,8 @@ esp_err_t idf_config_save_keepalive(bool enabled, int interval_days, uint8_t act
 esp_err_t idf_config_save_system_schedule(bool reboot_enabled, int reboot_hour,
                                           bool hb_enabled, int hb_hour);
 esp_err_t idf_config_save_sched_tasks(const IdfSchedTask tasks[IDF_MAX_SCHED_TASKS]);
-esp_err_t idf_config_save_sim(bool data_enabled, const std::string& apn,
-                              const std::string& operator_plmn);
+esp_err_t idf_config_save_sim(bool data_enabled, bool roaming_enabled, const std::string& apn,
+                              const std::string& operator_plmn, const std::string& phone_number);
 std::string idf_config_export_text(void);
 esp_err_t idf_config_import_text(const std::string& text, int* applied_count);
 esp_err_t idf_config_factory_reset(void);
@@ -148,6 +149,7 @@ struct IdfConfigWebView {
     bool hbEnabled = false;
     int hbHour = 9;
     bool dataEnabled = false;
+    bool roamingEnabled = true;
     std::string apn;
     std::string phoneNumber;
     std::string operatorPlmn;
@@ -203,6 +205,7 @@ struct IdfSchedRunView {
 
 struct IdfSimSettingsView {
     bool dataEnabled = false;
+    bool roamingEnabled = true;
     std::string apn;
     std::string operatorPlmn;
 };

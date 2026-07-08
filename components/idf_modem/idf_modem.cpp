@@ -700,8 +700,9 @@ static std::string parse_cops(const std::string& resp)
     size_t p = resp.find("+COPS:");
     if (p == std::string::npos) return {};
     std::string line = line_containing(resp, p);
-    std::string quoted = first_quoted(line);
-    return quoted.empty() ? line : quoted;
+    // 自动模式下若未先选名称格式，AT+COPS? 只回 "+COPS: 0"(无引号运营商名)。
+    // 此时返回空让上层改用 COPS=3,0 重试，而不是把模式位当运营商缓存下来。
+    return first_quoted(line);
 }
 
 static std::string parse_apn(const std::string& resp)
@@ -1203,7 +1204,11 @@ static bool apply_configured_data_mode_once(const IdfSimSettingsView& cfg, uint3
 {
     std::string resp;
     std::string apn = trim(cfg.apn);
-    if (cfg.dataEnabled) {
+    // 数据漫游策略：未勾选"允许数据漫游"且当前处于漫游(CEREG=5)时不激活蜂窝数据。
+    // 启动阶段注册状态未知(stat=-1)会乐观激活，注册完成后由 enforce_roaming_data_policy 兜底关闭。
+    bool want_data = cfg.dataEnabled &&
+                     (cfg.roamingEnabled || idf_modem_get_status().ceregStat != 5);
+    if (want_data) {
         if (!apn.empty() && apn_valid_for_at(apn)) {
             std::string cmd = "AT+CGDCONT=1,\"IP\",\"";
             cmd += apn;
@@ -1220,6 +1225,21 @@ static bool apply_configured_data_mode_once(const IdfSimSettingsView& cfg, uint3
     bool ok = send_ok("AT+CGACT=0,1", inactive_timeout_ms, &resp);
     if (ok) set_status_cell_ip("");
     return ok;
+}
+
+// 数据漫游策略兜底：未勾选"允许数据漫游"且当前漫游(stat=5)时确保蜂窝数据关闭。
+// 启动阶段拿不到注册状态会先乐观激活，注册完成后在此关闭，避免漫游误跑流量。
+// 短信不受影响(走 CS/IMS 信令域)。归属网络(stat=1)不干预，按常规激活。
+static void enforce_roaming_data_policy(const IdfSimSettingsView& cfg, int stat)
+{
+    if (!cfg.dataEnabled || cfg.roamingEnabled) return;  // 未开数据或允许漫游数据：无需干预
+    if (stat != 5) return;                                // 非漫游：归属网络按常规激活即可
+    if (idf_modem_get_status().cellIp.empty()) return;    // 数据本就未激活，无需再关
+    std::string resp;
+    if (send_ok("AT+CGACT=0,1", 3000, &resp)) {
+        set_status_cell_ip("");
+        idf_log_line("数据漫游已关闭：检测到漫游，已停用蜂窝数据(不跑流量)");
+    }
 }
 
 static void schedule_data_mode_retry(void)
@@ -1537,6 +1557,8 @@ static bool sample_identity_once(bool log_summary = false, bool include_network_
                         (!s_identity_network_attempted || before.operatorName.empty());
     if (need_network) {
         if (before.operatorName.empty()) {
+            // 先选长名称格式：自动模式下不设格式时 COPS? 只回模式位(+COPS: 0)，读不到运营商名
+            send_ok("AT+COPS=3,0", 1500, &resp);
             if (send_ok("AT+COPS?", 1500, &resp)) patch.operatorName = parse_cops(resp);
             vTaskDelay(pdMS_TO_TICKS(150));
         }
@@ -1813,6 +1835,7 @@ static void modem_task(void*)
         IdfSimSettingsView cfg = idf_config_get_sim_settings_view();
         apply_operator_if_configured(cfg);
         if (cfg.dataEnabled) sample_cell_ip_once();
+        enforce_roaming_data_policy(cfg, stat);
         // 注册成功后立即做一轮首页基础信息采样；Web/WiFi 已先启动，不会阻塞页面打开。
         sample_signal_once();
         sample_signal_detail_once();
@@ -1887,6 +1910,7 @@ static void modem_task(void*)
                         IdfSimSettingsView cfg = idf_config_get_sim_settings_view();
                         apply_operator_if_configured(cfg);
                         if (cfg.dataEnabled) sample_cell_ip_once();
+                        enforce_roaming_data_policy(cfg, stat);
                         sample_signal_once();
                         sample_signal_detail_once();
                         sample_identity_once(false, true);
@@ -2026,6 +2050,24 @@ void idf_modem_request_status_sample(void)
 {
     s_last_web_poll_us.store(esp_timer_get_time(), std::memory_order_relaxed);
     s_status_sample_requests.fetch_add(1, std::memory_order_relaxed);
+}
+
+void idf_modem_invalidate_sim_identity(void)
+{
+    // 清除随卡变化的身份字段：切/启/禁 eSIM Profile 后当前生效的卡已不同，
+    // 但 sample_identity_once 对非空字段跳过重读，会一直沿用旧卡的号码/ICCID/运营商。
+    if (s_status_mutex && xSemaphoreTake(s_status_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        s_status.iccid.clear();
+        s_status.imsi.clear();
+        s_status.phone.clear();
+        s_status.operatorName.clear();
+        s_status.apnSim.clear();
+        s_status.identityFresh = false;
+        xSemaphoreGive(s_status_mutex);
+    }
+    // 复位采样"已尝试"标志，让网络字段(运营商/号码)重新查询；静态字段(型号/IMEI)非空仍跳过
+    reset_identity_sampling_state();
+    idf_modem_request_status_sample();
 }
 
 void idf_modem_power_off_for_restart(void)

@@ -140,7 +140,8 @@
         MODEM_CHECK: c.modemReady ? '已就绪' : '未就绪', PUSH_COUNT: String(c.pushEnabledCount || 0), INBOX_MAX: String(c.inboxMax || ''),
         NTP: htmlEsc(c.ntpServer || ''), RB_CHECKED: checked(c.rebootEnabled), RB_HOUR: String(c.rebootHour == null ? 3 : c.rebootHour),
         HB_CHECKED: checked(c.hbEnabled), HB_HOUR: String(c.hbHour == null ? 9 : c.hbHour), TZ_OPTIONS: buildTzOptions(c.tzOffsetMin),
-        DATA_CHECKED: checked(c.dataEnabled), APN: htmlEsc(c.apn || ''), PHONE_NUMBER: htmlEsc(c.phoneNumber || ''),
+        DATA_CHECKED: checked(c.dataEnabled), ROAMING_CHECKED: checked(c.roamingEnabled !== false),
+        APN: htmlEsc(c.apn || ''), PHONE_NUMBER: htmlEsc(c.phoneNumber || ''),
         OPERATOR_PLMN: htmlEsc(c.operatorPlmn || ''), KA_PROFILE: htmlEsc(c.kaProfile || ''), PUSH_CHANNELS: buildPushChannels(c.pushChannels),
         NETLED_CHECKED: checked(c.netLedEnabled !== false), UPTIME: htmlEsc(c.uptimeText || '')
       };
@@ -1315,8 +1316,25 @@
       document.getElementById('tabSent').classList.toggle('active', b === 'sent');
       loadMessages();
     }
-    // 验证码提取(镜像固件 extractOtp：首段 4-8 位独立数字串)
-    function otpExtract(t) { var m = String(t).match(/(?:^|\D)(\d{4,8})(?:\D|$)/); return m ? m[1] : ''; }
+    // 验证码提取：短信须含验证码类关键词才提取(营销/通知类不出芯片)，
+    // 并跳过日期/时间片段(15/07/2026、2026-07-06、12:30)与更长数字串(订单号/手机号)，
+    // 优先取关键词之后最近的 4-8 位独立数字串(G-123456 类前置码退回首个候选)
+    function otpExtract(t) {
+      t = String(t);
+      var kw = t.search(/[验驗][证證][码碼]|[校检檢][验驗][码碼]|[动動][态態]密?[码碼]|[确確][认認][码碼]|激活[码碼]|安全[码碼]|取件[码碼]|[授][权權][码碼]|[随隨][机機][码碼]|短信[码碼]|登[录錄入][码碼]|一次性|verif|one[- ]?time|otp|passcode|auth code|security code|\b2fa\b|\bcode\b|\bpin\b/i);
+      if (kw < 0) return '';
+      var re = /\d{4,8}/g, m, first = '', after = '';
+      while ((m = re.exec(t))) {
+        var s = m[0], i = m.index, j = i + s.length;
+        var prev = i > 0 ? t.charAt(i - 1) : '', next = j < t.length ? t.charAt(j) : '';
+        if (/\d/.test(prev) || /\d/.test(next)) continue;                    // 更长数字串的一段
+        if (/[\/:.\-]/.test(prev) && /\d/.test(t.charAt(i - 2) || '')) continue;  // 日期/时间后半段
+        if (/[\/:.\-]/.test(next) && /\d/.test(t.charAt(j + 1) || '')) continue;  // 日期/时间前半段
+        if (!first) first = s;
+        if (i > kw) { after = s; break; }
+      }
+      return after || first;
+    }
     function htmlEsc(s) { return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
     function copyText(txt, el) {
       try { if (navigator.clipboard) navigator.clipboard.writeText(txt); } catch (e) {}
@@ -1460,8 +1478,10 @@
         wrap.className = 'ops';
         if (p.state === 'enabled') {
           wrap.appendChild(esimActionButton('禁用', 'btn-danger', 'disable', id, p.nickname || ''));
+          wrap.appendChild(esimActionButton('昵称', 'btn-secondary', 'nickname', id, p.nickname || ''));
         } else {
           wrap.appendChild(esimActionButton('切换/启用', 'btn-secondary', 'switch', id, p.nickname || ''));
+          wrap.appendChild(esimActionButton('昵称', 'btn-secondary', 'nickname', id, p.nickname || ''));
           wrap.appendChild(esimActionButton('删除', 'btn-danger', 'delete', id, p.nickname || ''));
         }
         ops.appendChild(wrap);
@@ -1478,39 +1498,27 @@
         if (!panelActive('sim')) return;
         d = d || {};
         esimRender(d);
-        var box = document.getElementById('esimResult');
-        if (box) {
+        // 仅在主动跟踪任务(polling)时弹 toast，被动打开面板不因历史已完成任务误弹旧消息
+        if (polling) {
           if (d.jobQueued || d.jobRunning) {
-            box.className = 'result-box result-loading';
-            box.textContent = d.jobMessage || 'eSIM 操作后台执行中...';
-          } else if (d.jobDone || polling) {
-            box.className = 'result-box ' + (d.jobSuccess ? 'result-success' : 'result-error');
-            box.textContent = d.message || (d.jobSuccess ? 'eSIM 操作已完成' : 'eSIM 操作失败');
-          } else if (d.cacheMessage) {
-            box.className = 'result-box result-info';
-            box.textContent = d.cacheMessage;
+            showToast(d.jobMessage || 'eSIM 操作后台执行中…', 'loading');
+          } else if (d.jobDone) {
+            showToast(d.message || (d.jobSuccess ? 'eSIM 操作已完成' : 'eSIM 操作失败'), d.jobSuccess ? 'ok' : 'err');
           }
         }
         if (esimTimer) clearTimeout(esimTimer);
         if (d.jobQueued || d.jobRunning) esimTimer = setTimeout(function(){ esimLoadStatus(true); }, 1500);
       }).catch(function(e) {
         if (!panelActive('sim')) return;
-        var box = document.getElementById('esimResult');
-        if (box) { box.className = 'result-box result-error'; box.textContent = 'eSIM 状态查询失败: ' + e; }
+        if (polling) showToast('eSIM 状态查询失败: ' + e, 'err');
       });
     }
     function esimStart(action, body) {
-      var box = document.getElementById('esimResult');
-      if (box) { box.className = 'result-box result-loading'; box.textContent = '正在提交 eSIM 任务...'; }
+      showToast('正在提交 eSIM 任务…', 'loading');
       fetch('/esim?action=' + encodeURIComponent(action), {method:'POST', cache:'no-store', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body || ''}).then(jsonOrThrow).then(function(d) {
-        if (d.success && d.queued) {
-          if (box) box.textContent = d.message || 'eSIM 任务已排队';
-          esimLoadStatus(true);
-        } else if (box) {
-          box.className = 'result-box result-error';
-          box.textContent = d.message || 'eSIM 任务启动失败';
-        }
-      }).catch(function(e){ if (box) { box.className = 'result-box result-error'; box.textContent = '请求失败: ' + e; } });
+        if (d.success && d.queued) { showToast(d.message || 'eSIM 任务已排队', 'loading'); esimLoadStatus(true); }
+        else { showToast(d.message || 'eSIM 任务启动失败', 'err'); }
+      }).catch(function(e){ showToast('请求失败: ' + e, 'err'); });
     }
     function esimInfo() { esimStart('info'); }
     function esimRefresh() { esimStart('refresh'); }
@@ -1520,6 +1528,12 @@
       if (action === 'disable' && !confirm('确定禁用该 eSIM Profile？')) return;
       if (action === 'switch' && !confirm('确定切换/启用该 eSIM Profile？模组可能短暂掉线。')) return;
       if (action === 'delete' && !confirm('确定删除该 eSIM Profile？\n\n' + esimMaskedId(id) + '\n\n删除后需要重新下载安装配置文件。')) return;
+      if (action === 'nickname') {
+        var nv = prompt('设置该 Profile 昵称（留空清除）', nick);
+        if (nv === null) return;  // 用户取消
+        esimStart('nickname', 'id=' + encodeURIComponent(id) + '&nickname=' + encodeURIComponent(nv.trim()));
+        return;
+      }
       var body = 'id=' + encodeURIComponent(id) + '&nickname=' + encodeURIComponent(nick);
       esimStart(action, body);
     }
