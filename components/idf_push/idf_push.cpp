@@ -29,6 +29,7 @@
 #include "idf_config.h"
 #include "idf_inbox.h"
 #include "idf_log.h"
+#include "idf_modem.h"
 #include "idf_wifi.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/ctr_drbg.h"
@@ -82,10 +83,11 @@ struct PushJob {
     uint8_t attempts = 0;
     bool notify = false;  // true=自定义提醒(标题即任务名,不套"短信来自"模板) false=转发短信
     int64_t nextUs = 0;
-    uint32_t inboxId = 0;  // 关联的收件箱条目；最终放弃时回改"未转发"供手动重发
     std::string sender;
     std::string text;
     std::string timestamp;
+    uint32_t inboxId = 0;  // 关联的收件箱条目；最终放弃时回改"未转发"供手动重发
+    uint32_t completionId = 0;
 };
 
 struct ForwardJob {
@@ -103,9 +105,17 @@ struct EmailJob {
     bool used = false;
     uint8_t attempts = 0;
     int64_t nextUs = 0;
-    uint32_t inboxId = 0;  // 同 PushJob：投递最终失败时回改收件箱标记
     std::string subject;
     std::string body;
+    uint32_t inboxId = 0;  // 同 PushJob：投递最终失败时回改收件箱标记
+    uint32_t completionId = 0;
+};
+
+struct ForwardCompletion {
+    bool used = false;
+    uint32_t id = 0;
+    uint32_t inboxId = 0;
+    uint8_t remaining = 0;
 };
 
 struct TestJob {
@@ -130,7 +140,9 @@ static std::array<PushJob, PUSH_QUEUE_MAX> s_push_jobs;
 static std::array<ForwardJob, FWD_QUEUE_MAX> s_forward_jobs;
 static std::array<EmailJob, EMAIL_QUEUE_MAX> s_email_jobs;
 static std::array<TestJob, IDF_MAX_PUSH_CHANNELS> s_test_jobs;
+static std::array<ForwardCompletion, PUSH_QUEUE_MAX + EMAIL_QUEUE_MAX> s_forward_completions;
 static bool s_started = false;
+static uint32_t s_next_completion_id = 0;
 static std::atomic<bool> s_busy{false};
 // 通道连续失败冷却状态（仅推送 worker 单任务读写，无需加锁）
 static uint8_t s_channel_fails[IDF_MAX_PUSH_CHANNELS] = {};
@@ -163,6 +175,8 @@ static void cleanup_start_resources()
     s_forward_jobs = {};
     s_email_jobs = {};
     s_test_jobs = {};
+    s_forward_completions = {};
+    s_next_completion_id = 0;
     memset(s_channel_fails, 0, sizeof(s_channel_fails));
     memset(s_channel_cool_until_us, 0, sizeof(s_channel_cool_until_us));
     s_busy.store(false, std::memory_order_relaxed);
@@ -198,6 +212,63 @@ static bool channel_cooling(uint8_t ch, int64_t now)
     return ch < IDF_MAX_PUSH_CHANNELS && s_channel_cool_until_us[ch] > now;
 }
 
+static uint32_t register_forward_completion_locked(uint32_t inbox_id, uint8_t total_targets)
+{
+    if (inbox_id == 0 || total_targets == 0) return 0;
+    for (auto& item : s_forward_completions) {
+        if (item.used) continue;
+        uint32_t next_id = ++s_next_completion_id;
+        if (next_id == 0) next_id = ++s_next_completion_id;
+        item.used = true;
+        item.id = next_id;
+        item.inboxId = inbox_id;
+        item.remaining = total_targets;
+        return item.id;
+    }
+    return 0;
+}
+
+static void note_forward_target_success(uint32_t completion_id)
+{
+    if (completion_id == 0) return;
+    uint32_t inbox_id_to_mark = 0;
+    ensure_init();
+    if (s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+        for (auto& item : s_forward_completions) {
+            if (!item.used || item.id != completion_id) continue;
+            if (item.remaining > 0) --item.remaining;
+            if (item.remaining == 0) {
+                inbox_id_to_mark = item.inboxId;
+                item = ForwardCompletion();
+            }
+            break;
+        }
+        xSemaphoreGive(s_mutex);
+    }
+    if (inbox_id_to_mark != 0) idf_inbox_mark_forwarded(inbox_id_to_mark);
+}
+
+static void cancel_forward_completion_locked(uint32_t completion_id)
+{
+    if (completion_id == 0) return;
+    for (auto& item : s_forward_completions) {
+        if (item.used && item.id == completion_id) {
+            item = ForwardCompletion();
+            break;
+        }
+    }
+}
+
+static void cancel_forward_completion(uint32_t completion_id)
+{
+    if (completion_id == 0) return;
+    ensure_init();
+    if (s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+        cancel_forward_completion_locked(completion_id);
+        xSemaphoreGive(s_mutex);
+    }
+}
+
 // "YYYY-MM-DD HH:MM:SS" 本地时间；时间未同步返回空串
 static std::string format_local_time(int tz_offset_min)
 {
@@ -229,6 +300,13 @@ static std::string trim(std::string value)
     size_t end = value.size();
     while (end > start && isspace(static_cast<unsigned char>(value[end - 1]))) --end;
     return value.substr(start, end - start);
+}
+
+static std::string local_phone_number()
+{
+    IdfModemStatus modem = idf_modem_get_status();
+    if (!modem.phone.empty()) return modem.phone;
+    return idf_config_get_status_view().phoneNumber;
 }
 
 static bool parse_push_channel_token(const std::string& value, uint8_t& channel)
@@ -315,17 +393,6 @@ static std::string url_encode(const std::string& value)
         }
     }
     return out;
-}
-
-static std::string replace_all(std::string value, const char* needle, const std::string& replacement)
-{
-    size_t pos = 0;
-    size_t len = strlen(needle);
-    while ((pos = value.find(needle, pos)) != std::string::npos) {
-        value.replace(pos, len, replacement);
-        pos += replacement.size();
-    }
-    return value;
 }
 
 static std::string hmac_sha256_base64(const std::string& data, const std::string& key)
@@ -480,11 +547,12 @@ static bool bark_reserved_param(const std::string& key)
 }
 
 static std::string apply_push_placeholders(const std::string& value, const std::string& sender,
-                                           const std::string& text, const std::string& timestamp)
+                                           const std::string& text, const std::string& timestamp,
+                                           const std::string& receiver)
 {
     // 单次扫描替换，避免发送者/内容里出现的 {message} 等字面量被二次展开
     std::string out;
-    out.reserve(value.size() + text.size());
+    out.reserve(value.size() + text.size() + receiver.size());
     size_t pos = 0;
     while (pos < value.size()) {
         size_t brace = value.find('{', pos);
@@ -496,6 +564,8 @@ static std::string apply_push_placeholders(const std::string& value, const std::
         if (value.compare(brace, 8, "{sender}") == 0) { out += sender; pos = brace + 8; }
         else if (value.compare(brace, 9, "{message}") == 0) { out += text; pos = brace + 9; }
         else if (value.compare(brace, 11, "{timestamp}") == 0) { out += timestamp; pos = brace + 11; }
+        else if (value.compare(brace, 10, "{receiver}") == 0) { out += receiver; pos = brace + 10; }
+        else if (value.compare(brace, 14, "{local_number}") == 0) { out += receiver; pos = brace + 14; }
         else { out += '{'; pos = brace + 1; }
     }
     return out;
@@ -503,7 +573,7 @@ static std::string apply_push_placeholders(const std::string& value, const std::
 
 static void append_bark_params(std::string& json, const std::string& params,
                                const std::string& sender, const std::string& text,
-                               const std::string& timestamp)
+                               const std::string& timestamp, const std::string& receiver)
 {
     std::string spec = trim(params);
     if (!spec.empty() && spec[0] == '?') spec.erase(0, 1);
@@ -526,7 +596,7 @@ static void append_bark_params(std::string& json, const std::string& params,
         }
 
         std::string value = eq == std::string::npos ? "1" : url_decode_component(item.substr(eq + 1));
-        value = apply_push_placeholders(trim(value), sender, text, timestamp);
+        value = apply_push_placeholders(trim(value), sender, text, timestamp, receiver);
         json += ",";
         json += "\"";
         json_escape_append(json, key);
@@ -1188,9 +1258,14 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
     std::string sender = sender_raw ? sender_raw : "";
     std::string text = text_raw ? text_raw : "";
     std::string timestamp = timestamp_raw ? timestamp_raw : "";
+    std::string receiver = notify ? std::string() : local_phone_number();
     std::string sender_json = json_escape(sender);
     std::string text_json = json_escape(text);
     std::string ts_json = json_escape(timestamp);
+    std::string receiver_json = json_escape(receiver);
+    std::string receiver_line_json = receiver.empty() ? std::string() : ("\\n本机号码: " + receiver_json);
+    std::string receiver_block_json = receiver.empty() ? std::string() : ("\\n\\n本机号码: " + receiver_json);
+    std::string receiver_html_json = receiver.empty() ? std::string() : ("<br><b>本机号码:</b> " + json_escape(html_escape(receiver)));
     std::string time_line_json = "\\n时间: " + ts_json;
     std::string time_block_json = "\\n\\n时间: " + ts_json;
     std::string time_html_json = "<br><b>时间:</b> " + ts_json;
@@ -1205,7 +1280,8 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
     switch (channel.type) {
         case PUSH_TYPE_POST_JSON:
             url = channel.url;
-            body = "{\"sender\":\"" + sender_json + "\",\"message\":\"" + text_json + "\",\"timestamp\":\"" + ts_json + "\"}";
+            body = "{\"sender\":\"" + sender_json + "\",\"receiver\":\"" + receiver_json +
+                   "\",\"message\":\"" + text_json + "\",\"timestamp\":\"" + ts_json + "\"}";
             break;
         case PUSH_TYPE_BARK: {
             BarkTarget bark = bark_target_from_channel(channel);
@@ -1218,16 +1294,17 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
             }
             json_prop(body, "title", title);
             body += ",";
-            json_prop(body, "body", text + "\n\n时间: " + timestamp);
-            append_bark_params(body, channel.key2, sender, text, timestamp);
+            json_prop(body, "body", text + (receiver.empty() ? std::string() : ("\n\n本机号码: " + receiver)) +
+                                   "\n\n时间: " + timestamp);
+            append_bark_params(body, channel.key2, sender, text, timestamp, receiver);
             body += "}";
             break;
         }
         case PUSH_TYPE_GET:
             method = "GET";
             url = channel.url + (channel.url.find('?') == std::string::npos ? "?" : "&") +
-                  "sender=" + url_encode(sender) + "&message=" + url_encode(text) +
-                  "&timestamp=" + url_encode(timestamp);
+                  "sender=" + url_encode(sender) + "&receiver=" + url_encode(receiver) +
+                  "&message=" + url_encode(text) + "&timestamp=" + url_encode(timestamp);
             break;
         case PUSH_TYPE_DINGTALK: {
             url = channel.url;
@@ -1242,7 +1319,7 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
                 ? ("{\"msgtype\":\"text\",\"text\":{\"content\":\"" + title_json + "\\n" +
                    text_json + time_line_json + "\"}}")
                 : ("{\"msgtype\":\"text\",\"text\":{\"content\":\"短信通知\\n发送者: " +
-                   sender_json + "\\n内容: " + text_json + time_line_json + "\"}}");
+                   sender_json + receiver_line_json + "\\n内容: " + text_json + time_line_json + "\"}}");
             break;
         }
         case PUSH_TYPE_PUSHPLUS: {
@@ -1253,7 +1330,7 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
             std::string sender_html = json_escape(html_escape(sender));
             std::string pp_content = notify
                 ? (text_html + time_html_json)
-                : ("<b>发送者:</b> " + sender_html + time_html_json + "<br><b>内容:</b><br>" + text_html);
+                : ("<b>发送者:</b> " + sender_html + receiver_html_json + time_html_json + "<br><b>内容:</b><br>" + text_html);
             body = "{\"token\":\"" + json_escape(channel.key1) + "\",\"title\":\"" + title_json +
                    "\",\"content\":\"" + pp_content + "\",\"channel\":\"" + push_channel + "\"}";
             break;
@@ -1275,13 +1352,15 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
             content_type = "application/x-www-form-urlencoded";
             std::string sc_desp = notify
                 ? ("**时间:** " + timestamp + "\n\n" + text)
-                : ("**发送者:** " + sender + "\n\n**时间:** " + timestamp + "\n\n**内容:**\n\n" + text);
+                : ("**发送者:** " + sender +
+                   (receiver.empty() ? std::string() : ("\n\n**本机号码:** " + receiver)) +
+                   "\n\n**时间:** " + timestamp + "\n\n**内容:**\n\n" + text);
             body = "title=" + url_encode(title) + "&desp=" + url_encode(sc_desp);
             break;
         }
         case PUSH_TYPE_CUSTOM:
             url = channel.url;
-            body = apply_push_placeholders(channel.customBody, sender_json, text_json, ts_json);
+            body = apply_push_placeholders(channel.customBody, sender_json, text_json, ts_json, receiver_json);
             break;
         case PUSH_TYPE_FEISHU:
             url = channel.url;
@@ -1296,14 +1375,14 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
                 ? ("\"msg_type\":\"text\",\"content\":{\"text\":\"" + title_json + "\\n" +
                    text_json + time_line_json + "\"}}")
                 : ("\"msg_type\":\"text\",\"content\":{\"text\":\"短信通知\\n发送者: " +
-                   sender_json + "\\n内容: " + text_json + time_line_json + "\"}}");
+                   sender_json + receiver_line_json + "\\n内容: " + text_json + time_line_json + "\"}}");
             break;
         case PUSH_TYPE_GOTIFY:
             url = channel.url;
             if (!url.empty() && url.back() != '/') url += "/";
             url += "message?token=" + url_encode(channel.key1);
             body = "{\"title\":\"" + title_json + "\",\"message\":\"" + text_json +
-                   time_block_json + "\",\"priority\":5}";
+                   receiver_block_json + time_block_json + "\",\"priority\":5}";
             break;
         case PUSH_TYPE_TELEGRAM: {
             std::string base = channel.url.empty() ? "https://api.telegram.org" : channel.url;
@@ -1313,7 +1392,7 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
                 ? ("{\"chat_id\":\"" + json_escape(channel.key1) + "\",\"text\":\"" + title_json + "\\n" +
                    text_json + time_line_json + "\"}")
                 : ("{\"chat_id\":\"" + json_escape(channel.key1) + "\",\"text\":\"短信通知\\n发送者: " +
-                   sender_json + "\\n内容: " + text_json + time_line_json + "\"}");
+                   sender_json + receiver_line_json + "\\n内容: " + text_json + time_line_json + "\"}");
             break;
         }
         default:
@@ -1332,7 +1411,8 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
 
 static bool enqueue_push_job_locked(uint8_t ch, const std::string& sender, const std::string& text,
                                     const std::string& timestamp, uint8_t attempts, uint32_t delay_sec,
-                                    bool notify = false, uint32_t inbox_id = 0)
+                                    bool notify = false, uint32_t inbox_id = 0,
+                                    uint32_t completion_id = 0)
 {
     int slot = -1;
     for (size_t i = 0; i < s_push_jobs.size(); ++i) {
@@ -1351,10 +1431,11 @@ static bool enqueue_push_job_locked(uint8_t ch, const std::string& sender, const
     job.attempts = attempts;
     job.notify = notify;
     job.nextUs = esp_timer_get_time() + static_cast<int64_t>(delay_sec) * 1000000LL;
-    job.inboxId = inbox_id;
     job.sender = sender;
     job.text = text;
     job.timestamp = timestamp;
+    job.inboxId = inbox_id;
+    job.completionId = completion_id;
     return true;
 }
 
@@ -1367,7 +1448,7 @@ static int push_queue_free_locked()
 
 static bool enqueue_email_job_locked(const std::string& subject, const std::string& body,
                                      uint8_t attempts = 0, uint32_t delay_sec = 0,
-                                     uint32_t inbox_id = 0)
+                                     uint32_t inbox_id = 0, uint32_t completion_id = 0)
 {
     int slot = -1;
     for (size_t i = 0; i < s_email_jobs.size(); ++i) {
@@ -1385,9 +1466,10 @@ static bool enqueue_email_job_locked(const std::string& subject, const std::stri
     job.used = true;
     job.attempts = attempts;
     job.nextUs = esp_timer_get_time() + static_cast<int64_t>(delay_sec) * 1000000LL;
-    job.inboxId = inbox_id;
     job.subject = subject;
     job.body = body;
+    job.inboxId = inbox_id;
+    job.completionId = completion_id;
     return true;
 }
 
@@ -1488,6 +1570,7 @@ static bool process_forward_one()
     }
 
     const IdfPushForwardView cfg = idf_config_get_push_forward_view();
+    const std::string receiver = local_phone_number();
     ForwardDecision fd = eval_forward_rules(cfg.forwardRules, job.sender, job.text);
     if (fd.matched && fd.drop) {
         idf_logf("转发规则命中：丢弃短信 id=%u", static_cast<unsigned>(job.inboxId));
@@ -1509,21 +1592,32 @@ static bool process_forward_one()
     std::string targets;  // 命中的通道名列表，用于一行日志点名去向
     ensure_init();
     if (s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+        int push_targets = 0;
         if (!job.pushQueued) {
-            int push_targets = 0;
             for (uint8_t i = 0; i < IDF_MAX_PUSH_CHANNELS; ++i) {
                 if (!(mask & (1u << i))) continue;
                 if (!channel_valid(cfg.pushChannels[i])) continue;
                 ++push_targets;
             }
-            if (push_targets > push_queue_free_locked()) {
-                enqueue_failed = true;
-                push_queue_busy = true;
-            }
-            for (uint8_t i = 0; i < IDF_MAX_PUSH_CHANNELS && !push_queue_busy; ++i) {
+        }
+        bool will_queue_email = email_selected && cfg.emailEnabled && cfg.emailConfigured;
+        uint8_t total_targets = static_cast<uint8_t>(push_targets + (will_queue_email ? 1 : 0));
+        if (push_targets > push_queue_free_locked()) {
+            enqueue_failed = true;
+            push_queue_busy = true;
+        }
+        if (will_queue_email && email_queue_depth_locked() >= static_cast<int>(EMAIL_QUEUE_MAX)) {
+            enqueue_failed = true;
+            email_queue_busy = true;
+        }
+        uint32_t completion_id = enqueue_failed ? 0 : register_forward_completion_locked(job.inboxId, total_targets);
+        if (!enqueue_failed && total_targets > 0 && job.inboxId != 0 && completion_id == 0) enqueue_failed = true;
+        if (!job.pushQueued) {
+            for (uint8_t i = 0; i < IDF_MAX_PUSH_CHANNELS && !enqueue_failed; ++i) {
                 if (!(mask & (1u << i))) continue;
                 if (!channel_valid(cfg.pushChannels[i])) continue;
-                if (enqueue_push_job_locked(i, job.sender, job.text, job.timestamp, 0, 0, false, job.inboxId)) {
+                if (enqueue_push_job_locked(i, job.sender, job.text, job.timestamp, 0, 0, false,
+                                            job.inboxId, completion_id)) {
                     ++dispatched;
                     had_queued_target = true;
                     if (!targets.empty()) targets += "、";
@@ -1536,7 +1630,7 @@ static bool process_forward_one()
             }
             if (dispatched > 0) job.pushQueued = true;
         }
-        if (!push_queue_busy && email_selected && cfg.emailEnabled && cfg.emailConfigured) {
+        if (!enqueue_failed && will_queue_email) {
             // 主题只放正文前若干字符(全文在正文里)，避免超长 Subject 被严格 MTA 拒收
             std::string subject = "短信";
             subject += job.sender;
@@ -1544,18 +1638,25 @@ static bool process_forward_one()
             subject += utf8_truncate(job.text, 48);
             std::string body = "来自：";
             body += job.sender;
+            if (!receiver.empty()) {
+                body += "，本机号码：";
+                body += receiver;
+            }
             if (!job.timestamp.empty()) {
                 body += "，时间：";
                 body += job.timestamp;
             }
             body += "，内容：";
             body += job.text;
-            email_queued = enqueue_email_job_locked(subject, body, 0, 0, job.inboxId);
+            email_queued = enqueue_email_job_locked(subject, body, 0, 0, job.inboxId, completion_id);
             if (email_queued) had_queued_target = true;
             else {
                 enqueue_failed = true;
                 email_queue_busy = true;
             }
+        }
+        if (enqueue_failed && completion_id != 0) {
+            cancel_forward_completion_locked(completion_id);
         }
         xSemaphoreGive(s_mutex);
     } else {
@@ -1582,7 +1683,6 @@ static bool process_forward_one()
     } else {
         idf_logf("转发 id=%u 无有效目标(未启用通道/未配置邮件)", static_cast<unsigned>(job.inboxId));
     }
-    idf_inbox_mark_forwarded(job.inboxId);
     s_busy.store(false, std::memory_order_relaxed);
     return true;
 }
@@ -1631,6 +1731,7 @@ static bool process_push_one()
 
     IdfPushChannel channel;
     if (!idf_config_get_push_channel(job.channel, channel) || !channel_valid(channel)) {
+        cancel_forward_completion(job.completionId);
         s_busy.store(false, std::memory_order_relaxed);
         return true;
     }
@@ -1639,6 +1740,7 @@ static bool process_push_one()
                               job.timestamp.c_str(), job.notify);
     note_channel_result(job.channel, ok);
     if (ok) {
+        note_forward_target_success(job.completionId);
         s_busy.store(false, std::memory_order_relaxed);
         return true;
     }
@@ -1646,6 +1748,7 @@ static bool process_push_one()
     job.attempts++;
     if (job.attempts >= PUSH_RETRY_MAX) {
         idf_logf("通道%u 重试%u次仍失败，放弃", static_cast<unsigned>(job.channel + 1), static_cast<unsigned>(job.attempts));
+        cancel_forward_completion(job.completionId);
         // 投递最终失败：把收件箱条目改回"未转发"，让丢失可见、可手动重发
         if (job.inboxId) idf_inbox_set_forwarded(job.inboxId, false);
         s_busy.store(false, std::memory_order_relaxed);
@@ -1654,10 +1757,12 @@ static bool process_push_one()
     uint32_t delay = backoff_seconds(job.attempts, static_cast<uint32_t>(job.channel * 7 + job.attempts));
     bool requeued = false;
     if (s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
-        requeued = enqueue_push_job_locked(job.channel, job.sender, job.text, job.timestamp, job.attempts, delay, job.notify, job.inboxId);
+        requeued = enqueue_push_job_locked(job.channel, job.sender, job.text, job.timestamp,
+                                           job.attempts, delay, job.notify, job.inboxId, job.completionId);
         xSemaphoreGive(s_mutex);
     }
     if (!requeued) {
+        cancel_forward_completion(job.completionId);
         idf_logf("推送重试队列已满，通道%u 本次重试未保留", static_cast<unsigned>(job.channel + 1));
         if (job.inboxId) idf_inbox_set_forwarded(job.inboxId, false);
     }
@@ -1677,6 +1782,7 @@ static bool process_email_one()
             bool purged = false;
             for (auto& j : s_email_jobs) {
                 if (j.used) purged = true;
+                cancel_forward_completion_locked(j.completionId);
                 j = EmailJob();
             }
             xSemaphoreGive(s_mutex);
@@ -1710,6 +1816,7 @@ static bool process_email_one()
 
     bool ok = send_smtp_email(cfg, job.subject, job.body);
     if (ok) {
+        note_forward_target_success(job.completionId);
         s_busy.store(false, std::memory_order_relaxed);
         return true;
     }
@@ -1717,6 +1824,7 @@ static bool process_email_one()
     job.attempts++;
     if (job.attempts >= PUSH_RETRY_MAX) {
         idf_logf("邮件重试%u次仍失败，放弃", static_cast<unsigned>(job.attempts));
+        cancel_forward_completion(job.completionId);
         // 同推送：最终失败回改"未转发"，避免收件箱假装已送达
         if (job.inboxId) idf_inbox_set_forwarded(job.inboxId, false);
         s_busy.store(false, std::memory_order_relaxed);
@@ -1725,10 +1833,12 @@ static bool process_email_one()
     uint32_t delay = backoff_seconds(job.attempts, static_cast<uint32_t>(job.subject.size() + job.body.size()));
     bool requeued = false;
     if (s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
-        requeued = enqueue_email_job_locked(job.subject, job.body, job.attempts, delay, job.inboxId);
+        requeued = enqueue_email_job_locked(job.subject, job.body, job.attempts, delay,
+                                            job.inboxId, job.completionId);
         xSemaphoreGive(s_mutex);
     }
     if (!requeued) {
+        cancel_forward_completion(job.completionId);
         idf_log_line("邮件重试队列已满，本次重试未保留");
         if (job.inboxId) idf_inbox_set_forwarded(job.inboxId, false);
     }
