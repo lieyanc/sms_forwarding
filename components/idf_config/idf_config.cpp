@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -325,6 +326,102 @@ static void append_kv_u32(std::string& out, const char* key, uint32_t value)
     append_kv(out, key, buf);
 }
 
+static const char* redact_secret(const std::string& value)
+{
+    return value.empty() ? "" : "__REDACTED__";
+}
+
+static const char* redact_custom_body(const std::string& value)
+{
+    return value.empty() ? "" : "__REDACTED__";
+}
+
+static std::string redact_push_url(const std::string& value)
+{
+    if (value.empty()) return {};
+    return "__REDACTED__";
+}
+
+static bool is_redacted_secret(const std::string& value)
+{
+    return value == "__REDACTED__";
+}
+
+static std::string translate_rule_perl_classes(const std::string& pattern)
+{
+    std::string out;
+    out.reserve(pattern.size() + 16);
+    bool in_bracket = false;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        char ch = pattern[i];
+        if (ch == '[' && !in_bracket) { in_bracket = true; out += ch; continue; }
+        if (ch == ']' && in_bracket) { in_bracket = false; out += ch; continue; }
+        if (ch != '\\' || i + 1 >= pattern.size()) { out += ch; continue; }
+        char next = pattern[i + 1];
+        const char* body = nullptr;
+        const char* neg = nullptr;
+        switch (next) {
+            case 'd': body = "0-9"; break;
+            case 'D': neg = "0-9"; break;
+            case 'w': body = "A-Za-z0-9_"; break;
+            case 'W': neg = "A-Za-z0-9_"; break;
+            case 's': body = " \t\r\n\f\v"; break;
+            case 'S': neg = " \t\r\n\f\v"; break;
+            default: out += ch; out += next; ++i; continue;
+        }
+        if (in_bracket) {
+            if (body) { out += body; ++i; }
+            else { out += ch; out += next; ++i; }
+        } else {
+            out += '[';
+            if (neg) { out += '^'; out += neg; }
+            else out += body;
+            out += ']';
+            ++i;
+        }
+    }
+    return out;
+}
+
+esp_err_t idf_config_validate_forward_rules(const std::string& rules, std::string* message)
+{
+    size_t pos = 0;
+    int line_no = 0;
+    while (pos < rules.size()) {
+        size_t end = rules.find('\n', pos);
+        if (end == std::string::npos) end = rules.size();
+        std::string line = trim_copy(rules.substr(pos, end - pos));
+        pos = end + (end < rules.size() ? 1 : 0);
+        ++line_no;
+        if (line.empty()) continue;
+
+        size_t t1 = line.find('\t');
+        size_t t2 = t1 == std::string::npos ? std::string::npos : line.find('\t', t1 + 1);
+        if (t1 == std::string::npos || t2 == std::string::npos) continue;
+        size_t t3 = line.find('\t', t2 + 1);
+        std::string type = line.substr(0, t1);
+        std::string pat = line.substr(t1 + 1, t2 - t1 - 1);
+        std::string enabled = t3 == std::string::npos ? "1" : trim_copy(line.substr(t3 + 1));
+        if (enabled == "0" || pat.empty() || type == "kw") continue;
+        if (type != "from" && type != "re") continue;
+
+        std::string posix = translate_rule_perl_classes(pat);
+        regex_t re = {};
+        int rc = regcomp(&re, posix.c_str(), REG_EXTENDED | REG_ICASE | REG_NOSUB);
+        if (rc != 0) {
+            if (message) {
+                char errbuf[96] = {};
+                regerror(rc, &re, errbuf, sizeof(errbuf));
+                *message = "第 " + std::to_string(line_no) + " 行正则无效: " + errbuf;
+            }
+            return ESP_ERR_INVALID_ARG;
+        }
+        regfree(&re);
+    }
+    if (message) message->clear();
+    return ESP_OK;
+}
+
 esp_err_t idf_config_load(void)
 {
     esp_err_t mutex_err = ensure_config_mutex();
@@ -454,22 +551,22 @@ esp_err_t idf_config_load(void)
     return ESP_OK;
 }
 
-std::string idf_config_export_text(void)
+std::string idf_config_export_text(bool full_export)
 {
     IdfConfig c = idf_config_get();
     std::string out;
     out.reserve(4096);
 
     append_kv(out, "wifiSsid", c.wifiSsid);
-    append_kv(out, "wifiPass", c.wifiPass);
+    append_kv(out, "wifiPass", full_export ? c.wifiPass : redact_secret(c.wifiPass));
     append_kv(out, "smtpServer", c.smtpServer);
     append_kv_i(out, "smtpPort", c.smtpPort);
     append_kv(out, "smtpUser", c.smtpUser);
-    append_kv(out, "smtpPass", c.smtpPass);
+    append_kv(out, "smtpPass", full_export ? c.smtpPass : redact_secret(c.smtpPass));
     append_kv(out, "smtpSendTo", c.smtpSendTo);
     append_kv(out, "adminPhone", c.adminPhone);
     append_kv(out, "webUser", c.webUser);
-    append_kv(out, "webPass", c.webPass);
+    append_kv(out, "webPass", full_export ? c.webPass : redact_secret(c.webPass));
     append_kv(out, "numBlkList", c.numberBlackList);
     append_kv(out, "fwdRules", c.forwardRules);
     append_kv_i(out, "emailEnabled", c.emailEnabled ? 1 : 0);
@@ -506,15 +603,15 @@ std::string idf_config_export_text(void)
         snprintf(key, sizeof(key), "push%dtype", i);
         append_kv_i(out, key, ch.type);
         snprintf(key, sizeof(key), "push%durl", i);
-        append_kv(out, key, ch.url);
+        append_kv(out, key, full_export ? ch.url : redact_push_url(ch.url));
         snprintf(key, sizeof(key), "push%dname", i);
         append_kv(out, key, ch.name);
         snprintf(key, sizeof(key), "push%dk1", i);
-        append_kv(out, key, ch.key1);
+        append_kv(out, key, full_export ? ch.key1 : redact_secret(ch.key1));
         snprintf(key, sizeof(key), "push%dk2", i);
-        append_kv(out, key, ch.key2);
+        append_kv(out, key, full_export ? ch.key2 : redact_secret(ch.key2));
         snprintf(key, sizeof(key), "push%dbody", i);
-        append_kv(out, key, ch.customBody);
+        append_kv(out, key, full_export ? ch.customBody : redact_custom_body(ch.customBody));
     }
 
     for (int i = 0; i < IDF_MAX_SCHED_TASKS; ++i) {
@@ -545,15 +642,15 @@ std::string idf_config_export_text(void)
 static void apply_import_key(IdfConfig& c, const std::string& key, const std::string& value)
 {
     if (key == "wifiSsid") c.wifiSsid = value;
-    else if (key == "wifiPass") c.wifiPass = value;
+    else if (key == "wifiPass" && !is_redacted_secret(value)) c.wifiPass = value;
     else if (key == "smtpServer") c.smtpServer = value;
     else if (key == "smtpPort") import_int_field(c.smtpPort, value);
     else if (key == "smtpUser") c.smtpUser = value;
-    else if (key == "smtpPass") c.smtpPass = value;
+    else if (key == "smtpPass" && !is_redacted_secret(value)) c.smtpPass = value;
     else if (key == "smtpSendTo") c.smtpSendTo = value;
     else if (key == "adminPhone") c.adminPhone = value;
     else if (key == "webUser" && !is_blank(value)) c.webUser = value;
-    else if (key == "webPass" && !is_blank(value)) c.webPass = value;
+    else if (key == "webPass" && !is_blank(value) && !is_redacted_secret(value)) c.webPass = value;
     else if (key == "numBlkList" || key == "numberBlackList") c.numberBlackList = value;
     else if (key == "fwdRules" || key == "forwardRules") c.forwardRules = value;
     else if (key == "emailEnabled") c.emailEnabled = bool_from_text(value);
@@ -607,11 +704,11 @@ static void apply_import_key(IdfConfig& c, const std::string& key, const std::st
         IdfPushChannel& ch = c.pushChannels[idx];
         if (suffix == "en") ch.enabled = bool_from_text(value);
         else if (suffix == "type") import_u8_field(ch.type, value);
-        else if (suffix == "url") ch.url = value;
+        else if (suffix == "url" && !is_redacted_secret(value)) ch.url = value;
         else if (suffix == "name") ch.name = value.empty() ? channel_default_name(idx) : value;
-        else if (suffix == "k1") ch.key1 = value;
-        else if (suffix == "k2") ch.key2 = value;
-        else if (suffix == "body") ch.customBody = value;
+        else if (suffix == "k1" && !is_redacted_secret(value)) ch.key1 = value;
+        else if (suffix == "k2" && !is_redacted_secret(value)) ch.key2 = value;
+        else if (suffix == "body" && !is_redacted_secret(value)) ch.customBody = value;
     }
 }
 
@@ -1167,6 +1264,8 @@ esp_err_t idf_config_save_forward_rules(const std::string& rules)
 {
     std::string next_rules = rules;
     limit_utf8_bytes(next_rules, 2048);
+    esp_err_t valid = idf_config_validate_forward_rules(next_rules, nullptr);
+    if (valid != ESP_OK) return valid;
 
     nvs_handle_t nvs = 0;
     esp_err_t err = begin_field_save(&nvs);

@@ -97,6 +97,7 @@ esp_err_t idf_config_save_email(bool enabled, const std::string& server, int por
                                 const std::string& send_to, bool preserve_blank_pass);
 esp_err_t idf_config_save_push(bool enabled, const IdfPushChannel channels[IDF_MAX_PUSH_CHANNELS]);
 esp_err_t idf_config_save_filter(const std::string& admin_phone, const std::string& number_blacklist);
+esp_err_t idf_config_validate_forward_rules(const std::string& rules, std::string* message);
 esp_err_t idf_config_save_forward_rules(const std::string& rules);
 esp_err_t idf_config_save_keepalive(bool enabled, int interval_days, uint8_t action,
                                     const std::string& target, const std::string& url,
@@ -106,7 +107,7 @@ esp_err_t idf_config_save_system_schedule(bool reboot_enabled, int reboot_hour,
 esp_err_t idf_config_save_sched_tasks(const IdfSchedTask tasks[IDF_MAX_SCHED_TASKS]);
 esp_err_t idf_config_save_sim(bool data_enabled, bool roaming_enabled, const std::string& apn,
                               const std::string& operator_plmn, const std::string& phone_number);
-std::string idf_config_export_text(void);
+std::string idf_config_export_text(bool full_export);
 esp_err_t idf_config_import_text(const std::string& text, int* applied_count);
 esp_err_t idf_config_factory_reset(void);
 esp_err_t idf_config_set_keepalive_last(uint32_t epoch);
