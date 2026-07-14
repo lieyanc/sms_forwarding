@@ -136,7 +136,7 @@ case "$ACTION" in
         idf.py "${IDF_ARGS[@]}" "$ACTION"
         ;;
     *)
-        echo "未知动作:$ACTION(可用:build/flash/monitor/flash-monitor/set-target/reconfigure/clean/fullclean)" >&2
+        echo "未知动作:$ACTION(可用:build/package/flash/monitor/flash-monitor/set-target/reconfigure/clean/fullclean)" >&2
         exit 2
         ;;
 esac

@@ -22,9 +22,10 @@ Linux helper (setup guide: `dev_doc/linux_build_flash.md`):
 
 ```bash
 tools/idf.sh build
+tools/idf.sh package                 # build + package OTA/full-flash images into build/dist (same layout as CI release)
 tools/idf.sh flash -p /dev/ttyACM0
 tools/idf.sh monitor -p /dev/ttyACM0
-tools/flash_tui.py   # interactive flash TUI: pick a serial port, flash/monitor in one key
+tools/flash_tui.py   # interactive flash TUI: pick a serial port, flash/monitor/package in one key
 ```
 
 The helper loads ESP-IDF 5.5.4, uses Ninja parallelism, and writes generated build files under `build/`.
