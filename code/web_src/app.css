@@ -10,7 +10,8 @@
       --ink: #E7EAEF; --body: #AEB6C1; --mute: #8B93A0; --faint: #576070;
       --amber: #018EEE; --amber-dim: #0160A1; --amber-glow: rgba(1,142,238,0.13);
       --link: #018EEE; --error: #DC6E4E;
-      --warning-soft: rgba(1,142,238,0.12);
+      --warn: #E8B23A; --warn-dim: #9C7A2C; /* 语义警示黄(信号弱/警告框),独立于主题强调色 */
+      --warning-soft: rgba(232,178,58,0.12);
       --sidebar-w: 234px;
       --radius-sm: 2px; --radius-md: 2px; --radius-pill: 2px;
       --shadow-card: none;
@@ -25,7 +26,8 @@
       --ink: #191D24; --body: #3F4651; --mute: #5C6573; --faint: #9AA2AE;
       --amber: #0177C7; --amber-dim: #01568F; --amber-glow: rgba(1,119,199,0.10);
       --link: #0177C7; --error: #B84E32;
-      --warning-soft: rgba(1,119,199,0.09);
+      --warn: #B07208; --warn-dim: #7E520A;
+      --warning-soft: rgba(176,114,8,0.09);
     }
     /* 信号量表(概览签名) */
     .sig-card .gauge { display: grid; grid-template-columns: 46px 1fr 96px; gap: 10px; align-items: center; margin-bottom: 9px; }
@@ -33,7 +35,7 @@
     .sig-card .gl { font: 600 10px/1 var(--mono); letter-spacing: 0.06em; color: var(--mute); }
     .sig-card .track { position: relative; height: 9px; background: var(--inset); border: 1px solid var(--hairline); border-radius: 1px; overflow: hidden; }
     .sig-card .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--amber); transition: width 0.35s cubic-bezier(0.3,0.7,0.3,1); }
-    .sig-card .fill.ok { background: #5CB585; } .sig-card .fill.warn { background: var(--amber); } .sig-card .fill.bad { background: #DC6E4E; }
+    .sig-card .fill.ok { background: #5CB585; } .sig-card .fill.warn { background: var(--warn); } .sig-card .fill.bad { background: #DC6E4E; }
     .sig-card .tk { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--hairline-strong); opacity: 0.7; }
     .sig-card .gv { font: 600 12px/1 var(--mono); text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
     /* 主题切换按钮(侧栏底部,跟随系统/浅色/深色三态循环) */
@@ -111,7 +113,7 @@
     .form-select { cursor: pointer; }
     .form-textarea { resize: vertical; min-height: 70px; line-height: 1.5; font-size: 12px; }
     .form-hint { font-size: 11px; color: var(--faint); margin-top: 5px; line-height: 1.5; }
-    .form-warning { font-size: 11.5px; color: var(--amber); background: var(--warning-soft); border: 1px solid var(--amber-dim); padding: 9px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; line-height: 1.5; }
+    .form-warning { font-size: 11.5px; color: var(--warn); background: var(--warning-soft); border: 1px solid var(--warn-dim); padding: 9px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; line-height: 1.5; }
     .form-row { display: flex; gap: 14px; }
     .form-row .form-group { flex: 1; }
 
@@ -327,7 +329,7 @@
     .stat .v { font-size: 18px; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; line-height: 1.15; font-family: var(--mono); font-variant-numeric: tabular-nums; }
     .stat .s { font-size: 10.5px; color: var(--faint); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mute); display: inline-block; flex: none; }
-    .dot.ok { background: #5CB585; } .dot.warn { background: var(--amber); } .dot.bad { background: #DC6E4E; }
+    .dot.ok { background: #5CB585; } .dot.warn { background: var(--warn); } .dot.bad { background: #DC6E4E; }
     .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; }
     .metric { background: var(--inset); border: 1px solid var(--hairline); border-radius: var(--radius-sm); padding: 10px 12px; }
     .metric .k { font-size: 9px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--mono); margin-bottom: 6px; }
