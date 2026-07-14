@@ -1,5 +1,5 @@
 /* ===== 方向 A · 场测仪 / Field-Test Instrument(暗色一等公民) =====
-       纯 vanilla，无网页字体。个性来自等宽数据 + 琥珀单强调 + 1px 网格 + 矩形。
+       纯 vanilla，无网页字体。个性来自等宽数据 + 蓝单强调 + 1px 网格 + 矩形。
        选择器与旧版完全一致，仅换观感，后端契约(元素 ID / JS / 占位符)不变。 */
     :root {
       color-scheme: dark;
@@ -8,9 +8,9 @@
       --canvas: #15181E; --canvas-soft: #1B1F27; --canvas-soft-2: #1B1F27; --inset: #0A0C0F;
       --hairline: #242A33; --hairline-strong: #333B47;
       --ink: #E7EAEF; --body: #AEB6C1; --mute: #8B93A0; --faint: #576070;
-      --amber: #E8B23A; --amber-dim: #9C7A2C; --amber-glow: rgba(232,178,58,0.13);
-      --link: #E8B23A; --error: #DC6E4E;
-      --warning-soft: rgba(232,178,58,0.12);
+      --amber: #018EEE; --amber-dim: #0160A1; --amber-glow: rgba(1,142,238,0.13);
+      --link: #018EEE; --error: #DC6E4E;
+      --warning-soft: rgba(1,142,238,0.12);
       --sidebar-w: 234px;
       --radius-sm: 2px; --radius-md: 2px; --radius-pill: 2px;
       --shadow-card: none;
@@ -23,9 +23,9 @@
       --canvas: #FFFFFF; --canvas-soft: #F2F4F7; --canvas-soft-2: #F2F4F7; --inset: #F6F8FA;
       --hairline: #D8DDE4; --hairline-strong: #C0C7D1;
       --ink: #191D24; --body: #3F4651; --mute: #5C6573; --faint: #9AA2AE;
-      --amber: #B07208; --amber-dim: #7E520A; --amber-glow: rgba(176,114,8,0.10);
-      --link: #B07208; --error: #B84E32;
-      --warning-soft: rgba(176,114,8,0.09);
+      --amber: #0177C7; --amber-dim: #01568F; --amber-glow: rgba(1,119,199,0.10);
+      --link: #0177C7; --error: #B84E32;
+      --warning-soft: rgba(1,119,199,0.09);
     }
     /* 信号量表(概览签名) */
     .sig-card .gauge { display: grid; grid-template-columns: 46px 1fr 96px; gap: 10px; align-items: center; margin-bottom: 9px; }
@@ -141,8 +141,8 @@
     }
     .btn:hover { border-color: var(--amber-dim); color: var(--amber); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary { background: var(--amber); color: #1A1306; border-color: var(--amber); }
-    .btn-primary:hover { background: #f2c155; color: #1A1306; }
+    .btn-primary { background: var(--amber); color: #06131A; border-color: var(--amber); }
+    .btn-primary:hover { background: #1E9BF5; color: #06131A; }
     .btn-secondary { background: var(--canvas-soft); color: var(--ink); box-shadow: none; }
     .btn-secondary:hover { background: var(--canvas-soft); color: var(--amber); border-color: var(--amber-dim); }
     .btn-danger { background: var(--canvas-soft); color: var(--ink); border-color: var(--hairline-strong); }

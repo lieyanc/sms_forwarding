@@ -2070,7 +2070,7 @@
       switchPanel(panelFromHash());
     });
     // ---- 右上角 toast：统一承载"会撑大卡片"的临时提示（下发/入队/执行结果等）----
-    // kind: 'ok'(绿) | 'err'(红) | 'info'(中性) | 'loading'(琥珀，常驻直到被下一条替换)
+    // kind: 'ok'(绿) | 'err'(红) | 'info'(中性) | 'loading'(蓝，常驻直到被下一条替换)
     function showToast(msg, kind) {
       kind = kind || 'ok';
       var t = document.getElementById('saveToast');
