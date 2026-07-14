@@ -57,6 +57,7 @@
 | PUSHPLUS / SERVERCHAN | `key1` 非空 |
 | GOTIFY | `url` 非空 **且** `key1` 非空 |
 | TELEGRAM | `key1` 非空 **且** `key2` 非空 |
+| MEOW | `key1` 非空（昵称） |
 
 **前提**: `ch.enabled == true`，否则直接返回 false。
 
@@ -172,7 +173,7 @@
 ---
 
 ### `void sendToChannel(const PushChannel& channel, const char* sender, const char* message, const char* timestamp)`
-**核心推送函数**。根据 `channel.type` 分发到 10 种推送方式之一。每个 case 构建对应的 HTTP 请求（URL/Header/Body），使用 `HTTPClient` 发送，打印响应码和内容。
+**核心推送函数**。根据 `channel.type` 分发到 11 种推送方式之一。每个 case 构建对应的 HTTP 请求（URL/Header/Body），使用 `HTTPClient` 发送，打印响应码和内容。
 
 **签名相关**:
 - 钉钉: `HMAC-SHA256(timestamp+"\n"+secret)` → Base64 → URLEncode → 追加到 URL

@@ -221,7 +221,7 @@ static void normalize_config(IdfConfig& c)
 
     for (int i = 0; i < IDF_MAX_PUSH_CHANNELS; ++i) {
         IdfPushChannel& ch = c.pushChannels[i];
-        ch.type = (ch.type >= 1 && ch.type <= 10) ? ch.type : 1;
+        ch.type = (ch.type >= 1 && ch.type <= 11) ? ch.type : 1;
         limit_utf8_bytes(ch.name, 64);
         if (ch.name.empty()) ch.name = channel_default_name(i);
         limit_utf8_bytes(ch.url, 512);
@@ -1369,7 +1369,7 @@ esp_err_t idf_config_save_email(bool enabled, const std::string& server, int por
 
 static void normalize_push_channel_for_save(IdfPushChannel& ch, int index)
 {
-    ch.type = (ch.type >= 1 && ch.type <= 10) ? ch.type : 1;
+    ch.type = (ch.type >= 1 && ch.type <= 11) ? ch.type : 1;
     ch.url = trim_copy(ch.url);
     ch.name = trim_copy(ch.name);
     ch.key1 = trim_copy(ch.key1);
@@ -1380,6 +1380,11 @@ static void normalize_push_channel_for_save(IdfPushChannel& ch, int index)
         ch.url.clear();
     }
     if (ch.type == 6 && ch.key1.empty() && !ch.url.empty() && !looks_like_url(ch.url)) {
+        ch.key1 = ch.url;
+        ch.url.clear();
+    }
+    // 11=MeoW：昵称误填进 URL 框时迁回 key1(与 Bark/Server酱 的 key1 救援一致)
+    if (ch.type == 11 && ch.key1.empty() && !ch.url.empty() && !looks_like_url(ch.url)) {
         ch.key1 = ch.url;
         ch.url.clear();
     }

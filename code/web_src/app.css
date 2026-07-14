@@ -2,6 +2,7 @@
        纯 vanilla，无网页字体。个性来自等宽数据 + 琥珀单强调 + 1px 网格 + 矩形。
        选择器与旧版完全一致，仅换观感，后端契约(元素 ID / JS / 占位符)不变。 */
     :root {
+      color-scheme: dark;
       --mono: 'SF Mono','Cascadia Code','JetBrains Mono','Consolas','Liberation Mono',monospace;
       --bg: #0E1014; --grid: rgba(255,255,255,0.025);
       --canvas: #15181E; --canvas-soft: #1B1F27; --canvas-soft-2: #1B1F27; --inset: #0A0C0F;
@@ -16,6 +17,7 @@
     }
     /* 浅色"纸面仪器"主题(独立调色，非反相) */
     html[data-theme="light"] {
+      color-scheme: light;
       --grid: rgba(20,28,40,0.03);
       --bg: #E7EAEF;
       --canvas: #FFFFFF; --canvas-soft: #F2F4F7; --canvas-soft-2: #F2F4F7; --inset: #F6F8FA;
@@ -34,12 +36,12 @@
     .sig-card .fill.ok { background: #5CB585; } .sig-card .fill.warn { background: var(--amber); } .sig-card .fill.bad { background: #DC6E4E; }
     .sig-card .tk { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--hairline-strong); opacity: 0.7; }
     .sig-card .gv { font: 600 12px/1 var(--mono); text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
-    /* 主题切换按钮 */
-    .theme-toggle { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px; margin-bottom: 10px;
+    /* 主题切换按钮(侧栏底部,跟随系统/浅色/深色三态循环) */
+    .theme-toggle { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px;
       background: var(--canvas-soft); border: 1px solid var(--hairline-strong); border-radius: var(--radius-sm);
       color: var(--mute); font: 600 11px/1 inherit; cursor: pointer; }
     .theme-toggle:hover { color: var(--amber); border-color: var(--amber-dim); }
-    .theme-toggle svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+    .theme-toggle svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -396,6 +398,8 @@
       .sidebar-footer { padding: 8px; }
       .sidebar-footer .btn span { display: none; }
       .sidebar-footer .btn { padding: 6px; font-size: 11px; }
+      .theme-toggle span { display: none; }
+      .theme-toggle { justify-content: center; padding: 8px 6px; }
       .main { margin-left: 50px; padding: 18px 14px; min-width: 0; }
       :root { --sidebar-w: 50px; }
       .card-grid { column-count: 1; }

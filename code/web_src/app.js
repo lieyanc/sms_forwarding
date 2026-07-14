@@ -1,5 +1,51 @@
-// 主题固定为浅色(深色模式已移除)
+// 主题:system(跟随系统)/light/dark 三态循环,存 localStorage;首帧主题已在 index.html 内联脚本应用
     var WEB_ASSET_HASH = '{{ASSET_HASH}}';
+    var THEME_ORDER = ['system', 'light', 'dark'];
+    var THEME_META = {
+      system: { label: '跟随系统', color: { light: '#E7EAEF', dark: '#0E1014' },
+        icon: '<rect x="2.5" y="4" width="19" height="13" rx="1.5"/><path d="M8 20h8M12 17v3"/>' },
+      light: { label: '浅色', color: '#E7EAEF',
+        icon: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7"/>' },
+      dark: { label: '深色', color: '#0E1014',
+        icon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.3 6.3 0 0 0 10.5 10.5z"/>' }
+    };
+    function storedThemePref() {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      return (t === 'light' || t === 'dark') ? t : 'system';
+    }
+    function systemPrefersDark() {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    function applyTheme(pref) {
+      var effective = pref === 'system' ? (systemPrefersDark() ? 'dark' : 'light') : pref;
+      document.documentElement.setAttribute('data-theme', effective);
+      var meta = document.getElementById('metaThemeColor');
+      if (meta) {
+        var c = THEME_META[pref].color;
+        meta.setAttribute('content', typeof c === 'string' ? c : c[effective]);
+      }
+      var icon = document.getElementById('themeIcon'), label = document.getElementById('themeLabel');
+      if (icon) icon.innerHTML = THEME_META[pref].icon;
+      if (label) label.textContent = THEME_META[pref].label;
+    }
+    function cycleTheme() {
+      var next = THEME_ORDER[(THEME_ORDER.indexOf(storedThemePref()) + 1) % THEME_ORDER.length];
+      try {
+        if (next === 'system') localStorage.removeItem('theme');
+        else localStorage.setItem('theme', next);
+      } catch (e) {}
+      applyTheme(next);
+    }
+    if (window.matchMedia) {
+      // 跟随系统时,系统深浅切换要实时反映;显式选浅/深色则忽略
+      try {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+          if (storedThemePref() === 'system') applyTheme('system');
+        });
+      } catch (e) {}
+    }
+    applyTheme(storedThemePref());
     var webConfig = null, webConfigReq = null;
     var loadedPanels = {};
     var panelSeq = 0, currentPanel = '', panelFetchCtrl = null;
@@ -57,13 +103,14 @@
     function pushTypeOptions(type) {
       var opts = [
         [1,'POST JSON（通用格式）'], [2,'Bark（iOS推送）'], [3,'GET请求（参数在URL中）'], [4,'钉钉机器人'],
-        [5,'PushPlus'], [6,'Server酱'], [7,'自定义模板'], [8,'飞书机器人'], [9,'Gotify'], [10,'Telegram Bot']
+        [5,'PushPlus'], [6,'Server酱'], [7,'自定义模板'], [8,'飞书机器人'], [9,'Gotify'], [10,'Telegram Bot'],
+        [11,'MeoW（消息推送）']
       ];
       return opts.map(function(o){ return '<option value="' + o[0] + '"' + (o[0] == type ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('');
     }
     function pushKeyInputType(type, slot) {
       type = parseInt(type) || 1;
-      if (slot === 1 && (type === 2 || type === 4 || type === 5 || type === 6 || type === 8 || type === 9)) return 'password';
+      if (slot === 1 && (type === 2 || type === 4 || type === 5 || type === 6 || type === 8 || type === 9 || type === 11)) return 'password';
       if (slot === 2 && type === 10) return 'password';
       return 'text';
     }
@@ -423,7 +470,7 @@
     }
     // 折叠状态下也能看出通道是什么：header 显示"名称 · 类型"摘要
     function pushTypeLabel(t) {
-      var m = {1:'POST JSON',2:'Bark',3:'GET',4:'钉钉',5:'PushPlus',6:'Server酱',7:'自定义',8:'飞书',9:'Gotify',10:'Telegram'};
+      var m = {1:'POST JSON',2:'Bark',3:'GET',4:'钉钉',5:'PushPlus',6:'Server酱',7:'自定义',8:'飞书',9:'Gotify',10:'Telegram',11:'MeoW'};
       return m[t] || '';
     }
     function updateChannelSummary(idx) {
@@ -475,6 +522,7 @@
       else if (type == 8) { hint.innerHTML = '飞书机器人<br>填写 Webhook 地址，签名验证需填 Secret'; extra.style.display='block'; document.getElementById('key1label'+idx).innerText='Secret（签名密钥，可选）'; document.getElementById('key1'+idx).placeholder='飞书签名密钥'; }
       else if (type == 9) { hint.innerHTML = 'Gotify<br>填写服务器地址 + 应用 Token'; extra.style.display='block'; document.getElementById('key1label'+idx).innerText='Token（应用 Token）'; document.getElementById('key1'+idx).placeholder='A...'; }
       else if (type == 10) { hint.innerHTML = 'Telegram Bot<br>Chat ID（参数1）+ Bot Token（参数2）'; extra.style.display='block'; document.getElementById('key1label'+idx).innerText='Chat ID'; document.getElementById('key1'+idx).placeholder='123456789'; if(kg)kg.style.display='block'; document.getElementById('key2label'+idx).innerText='Bot Token'; document.getElementById('key2'+idx).placeholder='12345678:ABC...'; }
+      else if (type == 11) { hint.innerHTML = 'MeoW 消息推送<br>填写 App 内设置的昵称，URL 留空使用官方服务'; extra.style.display='block'; document.getElementById('urllabel'+idx).innerText='MeoW 服务器 URL'; document.getElementById('url'+idx).placeholder='留空=https://api.chuckfang.com'; document.getElementById('key1label'+idx).innerText='昵称（Nickname）'; document.getElementById('key1'+idx).placeholder='MeoW App 中设置的昵称'; if(kg)kg.style.display='block'; document.getElementById('key2label'+idx).innerText='通知图标 URL（可选）'; document.getElementById('key2'+idx).placeholder='https://.../icon.png（建议 216×216 PNG）'; }
     }
     // ---- 推送通道：只显示已启用，其余由"添加推送通道"逐个展开 ----
     function setupChannels() {
@@ -722,7 +770,7 @@
       type=type||'resp';var log=document.getElementById('atLog'),div=document.createElement('div'),b=document.createElement('b');
       if(!log)return;
       var ts=document.createElement('span');ts.className='at-ts';ts.textContent='['+atTime()+'] ';
-      if(type==='user'){b.style.color='#fff';b.textContent='> ';}
+      if(type==='user'){b.style.color='var(--ink)';b.textContent='> ';}
       else if(type==='error'){b.style.color='#f44336';b.textContent='! ';}
       else{b.style.color='#50e3c2';b.textContent='';}
       div.appendChild(ts);div.appendChild(b);div.appendChild(document.createTextNode(msg));

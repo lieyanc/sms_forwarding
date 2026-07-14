@@ -121,7 +121,8 @@ static bool epoch_valid(uint32_t epoch)
 static bool push_key_sensitive(uint8_t type, int slot)
 {
     if (slot == 1) {
-        return type == 2 || type == 4 || type == 5 || type == 6 || type == 8 || type == 9;
+        // 11=MeoW：昵称即推送凭据，与 Bark device key 同级脱敏
+        return type == 2 || type == 4 || type == 5 || type == 6 || type == 8 || type == 9 || type == 11;
     }
     return slot == 2 && type == 10;
 }

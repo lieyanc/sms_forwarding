@@ -75,6 +75,7 @@ enum : uint8_t {
     PUSH_TYPE_FEISHU = 8,
     PUSH_TYPE_GOTIFY = 9,
     PUSH_TYPE_TELEGRAM = 10,
+    PUSH_TYPE_MEOW = 11,
 };
 
 struct PushJob {
@@ -395,6 +396,24 @@ static std::string url_encode(const std::string& value)
     return out;
 }
 
+// 路径段编码：空格必须用 %20 而不是 '+'（url_encode 的 '+' 约定仅适用于查询串）
+static std::string url_encode_path_segment(const std::string& value)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size() * 3);
+    for (unsigned char ch : value) {
+        if (isalnum(ch) || ch == '-' || ch == '.' || ch == '_' || ch == '~') {
+            out += static_cast<char>(ch);
+        } else {
+            out += '%';
+            out += hex[ch >> 4];
+            out += hex[ch & 0x0F];
+        }
+    }
+    return out;
+}
+
 static std::string hmac_sha256_base64(const std::string& data, const std::string& key)
 {
     unsigned char hmac[32] = {};
@@ -613,6 +632,37 @@ static void append_bark_params(std::string& json, const std::string& params,
     }
 }
 
+// MeoW 失败时 HTTP 状态码与 JSON status 字段仍是 200，唯一可靠的失败信号是响应体
+// 里的 "data":false。只有显式 false 才判失败：响应格式改变绝不能把真成功误判成
+// 失败，否则已送达的短信会被重试成重复推送
+static bool meow_response_failed(const std::string& resp, std::string& note)
+{
+    size_t key = resp.find("\"data\"");
+    if (key == std::string::npos) return false;
+    size_t pos = key + 6;
+    while (pos < resp.size() && (resp[pos] == ' ' || resp[pos] == '\t')) ++pos;
+    if (pos >= resp.size() || resp[pos] != ':') return false;
+    ++pos;
+    while (pos < resp.size() && (resp[pos] == ' ' || resp[pos] == '\t')) ++pos;
+    if (resp.compare(pos, 5, "false") != 0) return false;
+
+    note = "服务端返回 data:false";
+    size_t msg_key = resp.find("\"msg\"");
+    if (msg_key != std::string::npos) {
+        size_t colon = resp.find(':', msg_key + 5);
+        size_t start = colon == std::string::npos ? std::string::npos : resp.find('"', colon + 1);
+        if (start != std::string::npos) {
+            std::string value;
+            for (size_t i = start + 1; i < resp.size() && resp[i] != '"'; ++i) {
+                if (resp[i] == '\\' && i + 1 < resp.size()) { value += resp[i + 1]; ++i; }
+                else value += resp[i];
+            }
+            if (!value.empty()) note = utf8_truncate(value, 96);
+        }
+    }
+    return true;
+}
+
 static bool channel_valid(const IdfPushChannel& ch)
 {
     if (!ch.enabled || ch.type == PUSH_TYPE_NONE) return false;
@@ -626,6 +676,11 @@ static bool channel_valid(const IdfPushChannel& ch)
     if (ch.type == PUSH_TYPE_SERVERCHAN && ch.key1.empty() && ch.url.empty()) return false;
     if (ch.type == PUSH_TYPE_GOTIFY && ch.key1.empty()) return false;
     if (ch.type == PUSH_TYPE_TELEGRAM && (ch.key1.empty() || ch.key2.empty())) return false;
+    if (ch.type == PUSH_TYPE_MEOW) {
+        std::string nick = trim(ch.key1);
+        // 规范禁止昵称含斜杠；误贴 URL 这类必败请求不出网，免得攒满服务端"输错昵称"IP 封禁
+        if (nick.empty() || nick.find('/') != std::string::npos) return false;
+    }
     return true;
 }
 
@@ -696,15 +751,42 @@ static uint32_t backoff_seconds(uint8_t attempts, uint32_t seed)
     return step + (jitter ? (seed % (jitter + 1)) : 0);
 }
 
+// 小响应体捕获：MeoW 这类服务失败时 HTTP 仍回 200，必须读 body 才能判断成败
+static constexpr size_t HTTP_RESP_CAPTURE_MAX = 512;
+
+struct HttpRespCapture {
+    std::string* out = nullptr;
+};
+
+static esp_err_t http_event_capture(esp_http_client_event_t* evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data && evt->data && evt->data_len > 0) {
+        auto* capture = static_cast<HttpRespCapture*>(evt->user_data);
+        if (capture->out && capture->out->size() < HTTP_RESP_CAPTURE_MAX) {
+            size_t take = HTTP_RESP_CAPTURE_MAX - capture->out->size();
+            if (take > static_cast<size_t>(evt->data_len)) take = static_cast<size_t>(evt->data_len);
+            capture->out->append(static_cast<const char*>(evt->data), take);
+        }
+    }
+    return ESP_OK;
+}
+
 static esp_err_t http_request(const std::string& url, const char* method,
                               const char* content_type, const std::string& body,
-                              int& status_code)
+                              int& status_code, std::string* response = nullptr)
 {
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
     cfg.timeout_ms = HTTP_TIMEOUT_MS;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.keep_alive_enable = false;
+    HttpRespCapture capture;
+    if (response) {
+        response->clear();
+        capture.out = response;
+        cfg.event_handler = http_event_capture;
+        cfg.user_data = &capture;
+    }
     // 默认 TX 缓冲 512B 放不下长短信的 GET 请求行(百分号编码后可达 1.4KB+)；
     // 长合并短信(中文×百分号编码可膨胀 9 倍)按实际 URL 长度放宽，避免必败重试
     size_t tx_need = url.size() + 512;
@@ -1357,17 +1439,41 @@ static bool send_to_channel(const IdfPushChannel& channel, const char* sender_ra
                    sender_json + receiver_line_json + "\\n内容: " + text_json + time_line_json + "\"}");
             break;
         }
+        case PUSH_TYPE_MEOW: {
+            // MeoW: POST {服务器}/{昵称}，标题/内容/图标全走 JSON body(Body 字段优先于路径 title)
+            std::string base = trim(channel.url);
+            if (base.empty()) base = "https://api.chuckfang.com";
+            while (!base.empty() && base.back() == '/') base.pop_back();
+            url = base + "/" + url_encode_path_segment(trim(channel.key1));
+            body = "{";
+            json_prop(body, "title", title);
+            body += ",";
+            json_prop(body, "msg", text + (receiver.empty() ? std::string() : ("\n\n本机号码: " + receiver)) +
+                                   "\n\n时间: " + timestamp);
+            std::string icon = trim(channel.key2);
+            if (!icon.empty()) {
+                body += ",";
+                json_prop(body, "imgUrl", icon);
+            }
+            body += "}";
+            break;
+        }
         default:
             return false;
     }
 
     std::string name = channel.name.empty() ? ("通道" + std::to_string(channel.type)) : channel.name;
     int code = 0;
-    esp_err_t err = http_request(url, method, content_type, body, code);
+    std::string resp;
+    esp_err_t err = http_request(url, method, content_type, body, code,
+                                 channel.type == PUSH_TYPE_MEOW ? &resp : nullptr);
     bool ok = (err == ESP_OK && code >= 200 && code < 300);
+    std::string fail_note;
+    if (ok && channel.type == PUSH_TYPE_MEOW && meow_response_failed(resp, fail_note)) ok = false;
     // 发送中+响应码两行合并为一行结果，降噪同时保留通道名与成败
-    if (err == ESP_OK) idf_logf("%s 推送%s (HTTP %d)", name.c_str(), ok ? "成功" : "失败", code);
-    else idf_logf("%s 推送失败: %s", name.c_str(), esp_err_to_name(err));
+    if (err != ESP_OK) idf_logf("%s 推送失败: %s", name.c_str(), esp_err_to_name(err));
+    else if (!fail_note.empty()) idf_logf("%s 推送失败 (HTTP %d): %s", name.c_str(), code, fail_note.c_str());
+    else idf_logf("%s 推送%s (HTTP %d)", name.c_str(), ok ? "成功" : "失败", code);
     return ok;
 }
 

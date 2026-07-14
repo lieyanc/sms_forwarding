@@ -13,6 +13,7 @@
     ↑/↓ 或 j/k   选择串口        r   刷新设备列表
     Enter 或 f   烧录            g   烧录并打开日志
     m            串口日志        b   仅构建
+    p            构建并打包 OTA/整机镜像(build/dist)
     q / Esc      退出
 """
 
@@ -20,11 +21,14 @@ import curses
 import glob
 import locale
 import os
+import re
 import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IDF_SH = os.path.join(REPO_ROOT, "tools", "idf.sh")
+CONFIG_HEADER = os.path.join(
+    REPO_ROOT, "components", "idf_config", "include", "idf_config.h")
 
 # 常见 USB 串口芯片厂商,仅用于列表展示提示
 VENDOR_HINTS = {
@@ -81,6 +85,12 @@ def print_list():
         flag = "可用" if p["ok"] else "无权限(需加入 dialout 组)"
         print(f"{p['dev']:<16} {p['info']:<44} {flag}")
     return 0
+
+
+def fw_version():
+    """从 idf_config.h 读取 IDF_FW_VERSION,读不到返回空串。"""
+    m = re.search(r'IDF_FW_VERSION = "([^"]+)"', read_sys(CONFIG_HEADER))
+    return m.group(1) if m else ""
 
 
 def run_idf(stdscr, args, pause=True):
@@ -152,7 +162,7 @@ def draw(stdscr, colors, ports, sel, msg, msg_attr):
     base = 5 + max(1, len(ports))
     put(base, 0, "操作:", curses.A_BOLD)
     put(base + 1, 2, "Enter/f 烧录    g 烧录并打开日志    m 串口日志(Ctrl+] 退出)")
-    put(base + 2, 2, "b 仅构建        r 刷新设备列表      q 退出")
+    put(base + 2, 2, "b 仅构建        p 构建并打包 OTA    r 刷新设备列表      q 退出")
 
     if ports and not ports[sel]["ok"]:
         put(base + 4, 0, "提示:当前串口无权限,先执行 sudo usermod -aG dialout $USER 并注销重登",
@@ -189,6 +199,15 @@ def main(stdscr):
             rc = run_idf(stdscr, ["build"])
             ok = rc == 0
             msg = "构建完成" if ok else f"构建失败(退出码 {rc})"
+            msg_attr = colors.ok if ok else colors.err
+        elif ch == ord("p"):
+            rc = run_idf(stdscr, ["package"])
+            ok = rc == 0
+            if ok:
+                v = fw_version() or "?"
+                msg = f"打包完成:build/dist/sms_forwarder_ota_v{v}.bin(整机包 full 同目录)"
+            else:
+                msg = f"打包失败(退出码 {rc})"
             msg_attr = colors.ok if ok else colors.err
         elif ch in (curses.KEY_ENTER, 10, 13, ord("f"), ord("g"), ord("m")):
             if not ports:

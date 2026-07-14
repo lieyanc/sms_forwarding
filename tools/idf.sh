@@ -4,6 +4,7 @@
 #
 # 用法:
 #   tools/idf.sh build                       # 构建固件
+#   tools/idf.sh package                     # 构建并打包 OTA/整机镜像到 build/dist
 #   tools/idf.sh flash -p /dev/ttyACM0      # 烧录(不带 -p 时自动探测串口)
 #   tools/idf.sh monitor -p /dev/ttyACM0    # 打开串口日志,Ctrl+] 退出
 #   tools/idf.sh flash-monitor               # 烧录后直接打开串口日志
@@ -82,14 +83,39 @@ resolve_port() {
     fi
 }
 
+do_build() {
+    idf.py "${IDF_ARGS[@]}" reconfigure
+    if [[ -n "$JOBS" ]]; then
+        ninja -C "$BUILD_DIR" -j "$JOBS"
+    else
+        ninja -C "$BUILD_DIR"
+    fi
+}
+
 case "$ACTION" in
     build)
-        idf.py "${IDF_ARGS[@]}" reconfigure
-        if [[ -n "$JOBS" ]]; then
-            ninja -C "$BUILD_DIR" -j "$JOBS"
-        else
-            ninja -C "$BUILD_DIR"
+        do_build
+        ;;
+    package)
+        # 与 CI(.github/workflows/build.yml)的发布打包保持一致,产物按仓库约定放 build/dist:
+        #   sms_forwarder_ota_v<版本>.bin   网页「固件升级」直接上传(仅 app 分区镜像)
+        #   sms_forwarder_full_v<版本>.bin  整机烧录包,esptool 从 0x0 写入
+        do_build
+        VERSION="$(grep -oP 'IDF_FW_VERSION = "\K[0-9A-Za-z.\-]+' \
+            "$REPO_ROOT/components/idf_config/include/idf_config.h")"
+        if [[ -z "$VERSION" ]]; then
+            echo "无法从 components/idf_config/include/idf_config.h 解析 IDF_FW_VERSION,打包终止。" >&2
+            exit 1
         fi
+        DIST_DIR="$REPO_ROOT/build/dist"
+        mkdir -p "$DIST_DIR"
+        cp "$BUILD_DIR/sms_forwarding_idf.bin" "$DIST_DIR/sms_forwarder_ota_v${VERSION}.bin"
+        esptool.py --chip esp32c3 merge_bin -o "$DIST_DIR/sms_forwarder_full_v${VERSION}.bin" \
+            0x0 "$BUILD_DIR/bootloader/bootloader.bin" \
+            0x8000 "$BUILD_DIR/partition_table/partition-table.bin" \
+            0x10000 "$BUILD_DIR/sms_forwarding_idf.bin"
+        echo "打包完成(固件 v${VERSION}):"
+        ls -l "$DIST_DIR"
         ;;
     flash)
         resolve_port

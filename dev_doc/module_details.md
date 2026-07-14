@@ -22,7 +22,7 @@
 
 ## components/idf_push
 
-负责转发规则、推送队列、邮件队列、失败重试、通道冷却、测试推送和 10 类推送渠道。慢速 HTTP/HTTPS/SMTP 只在 worker 中执行。
+负责转发规则、推送队列、邮件队列、失败重试、通道冷却、测试推送和 11 类推送渠道。慢速 HTTP/HTTPS/SMTP 只在 worker 中执行。
 
 ## components/idf_web
 

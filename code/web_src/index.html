@@ -3,7 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#E7EAEF" id="metaThemeColor">
   <title>SMS Forwarding</title>
+  <script>
+  /* 首帧定主题,避免加载闪烁:localStorage 存 light/dark,其余情况跟随系统;JS 禁用时回退浅色 */
+  (function(){
+    var t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    if (t !== 'light' && t !== 'dark') {
+      t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+  </script>
   <link rel="stylesheet" href="/assets/app.css?v={{ASSET_HASH}}">
 </head>
 <body>
@@ -34,7 +46,11 @@
       <div class="sidebar-section-label">系统</div>
       <a data-panel="settings"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span> <span>系统设置</span></a>
     </nav>
-    <!-- 主题切换已移除：固定浅色 -->
+    <div class="sidebar-footer">
+      <button type="button" class="theme-toggle" id="themeToggle" onclick="cycleTheme()" title="切换主题(跟随系统/浅色/深色)">
+        <svg id="themeIcon" viewBox="0 0 24 24" aria-hidden="true"></svg><span id="themeLabel">跟随系统</span>
+      </button>
+    </div>
   </aside>
 
   <main class="main" id="panelHost">
